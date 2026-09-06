@@ -1,6 +1,6 @@
 ********************************************************************************
 * Backup Bit Remover - MDOS Edition
-* Written March 15, 2004 by Timothy A Tesch @10:23pm
+* Written March 15, 2004 by T.Tesch @10:23pm
 *
 *
 * IDea: If no device is entered, show menu to user just like TI version.
@@ -510,7 +510,7 @@ DSKSUBNAME  BYTE 13,10
 
 TITLE1
        BYTE 13,10
-       TEXT 'BBRM v2.0 (c)2004 by Timothy A Tesch  (12 Oct 2004)'
+       TEXT 'BBRM v2.0 (c)2004 by T. Tesch  (12 Oct 2004)'
        BYTE 13,10
        TEXT '==================================================='
        BYTE 0
