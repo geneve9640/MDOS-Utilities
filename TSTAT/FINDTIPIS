@@ -1,0 +1,58 @@
+; File: FINDTIPIS    3/19/2023
+;
+; Device find routine. Hardcoded, per JediMatt, TIPI device loc won't change.
+; Source is a modified version of the Geneve OS detection routine
+;
+; Reliance on the MDOS DSR powerup is not recommended, since programs can
+; be loaded using older OS versions that have no powerup detection.
+;
+; 3.19.2023, confirmed TIPCRU==0 causes main program to exit (not found)
+;
+TIPIWS3 BSS 32
+TIPINAME
+       BYTE >04,'T','I','P','I'
+HBAA   BYTE >AA
+       EVEN
+SAVPG1 DATA >00BA        ;save in MSByte; bus page Lsbyte
+
+TIPI_FIND   DATA TIPIWS3,TIP_F
+TIP_F  LIMI 0            1.13.2020
+       MOVB @>F112,@SAVPG1
+       MOVB @SAVPG1+1,@>F112
+
+       LI   R12,>1000    Starting CRU
+       CLR  @TIPCRU
+
+ISDSR  SBO  0            ;loop here
+       CB   @>4000,@HBAA      ;C000
+       JNE  NEXTCARD     ;no dsr rom header found
+
+       MOV  @>4008,R0         ;C008
+       JEQ  NEXTCARD     ;no dsr device (ie, end of list)
+
+       AI   R0,4         R0 NOW POINTS TO DSR NAME
+;;     AI   R0,>C000->4000    ;OFFSET
+
+       LI   R1,TIPINAME
+       LI   R2,5         COMPARE 5 BYTES OF NAME STRING
+
+TESTNM CB   *R0+,*R1+
+       JNE  NEXTCARD
+       DEC  R2
+       JNE  TESTNM
+
+       SBZ  0            FOUND TIPI
+       MOV  R12,@TIPCRU
+       JMP  RESTOREMAPPER
+
+NEXTCARD
+       SBZ  0
+       AI   R12,>0100
+       CI   R12,>1E00
+       JL   ISDSR        scan next or return
+
+RESTOREMAPPER
+       MOVB @SAVPG1,@>F112    ;tipcru is 0 if not found
+       RTWP
+
+; end tipi find

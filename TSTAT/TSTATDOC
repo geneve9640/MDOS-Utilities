@@ -1,0 +1,66 @@
+File:       TSTAT
+Program:    TIPI Status and Update program for Geneve OS/MDOS 7.30 and above
+Version:    1.3 updated 5 September 2026
+Copyright:  (C)2026 T.Tesch
+Contact:    InsaneMultitasker or 9640News, at AtariAge.com
+=====================================================================
+
+TSTAT is a command line program that will display the current TIPI status
+by default.  It will also display the current configuration, halt, reset,
+and update the RPi. For use with Geneve OS/MDOS version 7.30 and above.
+
+
+USAGE:
+=======
+TSTAT is run from the Geneve OS command line or batch file:
+
+               TSTAT <optional parameter>
+
+      Options: TSTAT C   - Show PI.CONFIG
+               TSTAT H   - Halt the Raspberry PI (PI.SHUTDOWN)
+               TSTAT R   - Restart the Raspberry PI (PI.RESTART)
+               TSTAT S   - Show PI.STATUS
+               TSTAT U   - Force upgrade (PI.UPGRADE)
+               TSTAT E   - Display the EPROM version date/time stamp
+               TSTAT ?   - show options
+
+       The upgrade and restart options wait for the operation to complete.
+       A "spinner" is displayed until the TIPI card senses the RPi is ready.
+
+
+ENHANCEMENT LOG:
+---------------
+v1.30  5 September 2026
+       Display current version with update status (no parameters)
+          Removes the annoyance of running "S" just to see the version
+       [U]pdate bypasses routien if version is current
+       Fixed a few boundary conditions
+       Wrote some messy code so I have more to fix in the future
+
+V1.20  22 June 2024
+       Added Eprom version, requested by DHE
+       Improved TTYOUT routine
+       Minor changes to text
+
+V1.10  01 November 2023
+       Default now only shows TIPI update status. Added audible alert to
+         signal a pending update.
+       Added option "S" to show the full status with update indicator.
+
+V1.00  19 April 2023
+       TIPI CRU detection added; removed hard-coded 0x1800 address.
+       Graceful exit if TIPI card not found. Some minor cleanup.
+       Ready for distribution with MDOS 7.40 release package.
+
+V0.9   07 February 2022
+       Added CTRL-C support. Fixed spinner in graphics/text mode. Enables
+       sound list interrupt processing.
+
+V0.8   06 February 2022
+       Added options, fixed Update status detection, warning bell added
+       Spinner fails in Graphics mode 60
+
+V0.6   06 February 2022
+       Initial test release. Removed from distribution.
+
+** End of file 23-Apr-2023, TT

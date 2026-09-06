@@ -1,0 +1,725 @@
+********************************************************************************
+* TSTATS  TIPI Status and update utility. Geneve 9640
+* (C)2024 Insane Multitasker
+*
+* 2-6-2022  Fixed update notification (for now, with x.yy values)
+*           Added spinner
+* 2-7-2022  Added CTRL-C support
+*  v0.9     Fixed errant TTYOUT DATA statement (missing ,0)
+*           Added loop/interrupt to allow sound timer to expire
+* 3-19-2023 V1.0, Added TIPI device scan to detect CRU in advance of MDOS 7.40+
+*                 See FINDTIPIS source. Copy statement just before text
+*
+*11-01-2023 V1.1  Default shows only the update status and beeps if present
+*                 Use "S" to show the pi.status w/update
+*
+* 6.22.2024 v1.2  Display EPROM revision string. Requested by DHE.
+*                 Cleaned up old TTYOUT routine
+*                $File reader is limited to 50 line
+* 'Usage:  TSTAT [?RHUCSE]   {Restart Halt Update Config Status Eprom}'
+*
+* 9.4.2026  v1.3  Display TIPI version when no parameters entered
+*                 Test for null STATUS file and null record length
+*                 If user selects [U]pdate but no update is available,
+*                   just display current version and skip. Mess code; fix l8r
+*
+*
+
+WS     EQU  >F000        my workspace
+*
+MAIN3  LWPI WS          LET'S LOAD OUR WORKSPACE
+       LIMI 0            turn off those interrupts!
+       BL   @TTYOUT      Give user a title
+       DATA TITLE1,0
+
+MEMOK  LI   R0,4         get the memory table
+       LI   R1,PGETBL    and put it into the page table
+       LI   R2,254       this is overdoing it for 2Meg system, but who cares
+       XOP  @MEM,0       do it!
+
+       BLWP @TIPI_FIND   ;via FINDTIPIS
+       MOV  @TIPCRU,R1
+       JNE  GETAFILE
+
+       BL   @TTYOUT
+       DATA NOTIPI,0
+       B    @EXIT
+
+NOTIPI BYTE 13
+       TEXT 'TIPI device not detected. Exiting program.'
+       DATA 0
+
+***********************
+* GET THE FILE FROM CLI
+*
+* parse routine from who knows where... at least it works
+*
+GETAFILE
+       CLR  @SHOWUPONLY
+       LI   R0,>3200          50 bytes for WORK length
+       LI   R1,WORK-1         patch it
+       MOVB R0,*R1+           crunch command line and move it to WORK
+       MOV  @>0128,R2         get command line argument address
+;      JEQ  USAGE1   nogot    if no arguments
+       JNE  NOD1
+       SETO @SHOWUPONLY
+       B    @SHOWSTAT            ;no arguments, show status!
+
+NOD1   CB   @2(R2),@-1(R1)    see if command line is too long
+       JHE  USAGE1   nogot    if too long
+       MOV  R1,R5             else save address of WORK to R5
+       DEC  R5                to length pointer
+       MOVB @2(R2),R6         argument length
+       SRL  R6,8              make it a word
+       INCT R6                add two
+
+NXTNOD MOV  R2,R3             save command address
+       INCT R3                add 2
+       MOV  R2,R4
+       AI   R4,8
+GETNOD MOVB *R3+,*R5+         start moving the data
+       DEC  R6                till count is done
+       JEQ  GOTCMD
+
+       C    R3,R4             r3 holds node count
+       JL   GETNOD            if done this node, go get some more
+       MOV  *R2,R2            get next node
+       JMP  NXTNOD
+;
+; All nodes have been copied into WORK area
+;
+GOTCMD MOVB @WORK-1,R1   length of argument
+;      JEQ  NOGOT        if no arg
+;;     JEQ  SHOWSTAT     status and update only
+       JEQ  USAGE1
+
+       SRL  R1,8         else make it a word
+       CI   R1,1         <>1 char?
+       JH   USAGE1       yea, show user command options and exit
+
+; check for valid option
+
+       LI   R4,WORK      our single char option
+       LI   R5,OPTAB
+       LI   R6,OPINDX
+OPLOP1 MOVB *R5,*R5      end of table? show usage
+       JEQ  USAGE1
+       CB   *R4,*R5+     match (and inc to next op)
+       JEQ  OPLOP3
+       CB   *R4,*R5+     not best way, but it works
+       JEQ  OPLOP3
+       INCT R6           next index
+       JMP  OPLOP1
+;Branch
+OPLOP3 MOV *R6,R6        Could BL and come back too
+       B    *R6           for now direct
+
+OPTAB  TEXT '  ??RrHhUuCcSsEe'
+       DATA 0
+OPINDX DATA USAGE1,USAGE1,RESTART,HALT,UPDATE,CONFIG,SHOWSTAT,SHOWEPROM
+       DATA 0
+
+SHOWUPONLY DATA 0        ;if <>0, tstat only shows update pending/beeps
+
+; Educate User and exit
+USAGE1 BL   @TTYOUT
+       DATA USAGE,0
+       B    @EXIT
+
+FULLBUF DATA 0           flag if we read to end of buffer
+*-------------------------------------------------------------
+*
+
+;6.22.2024, requested by DHE
+SHOWEPROM
+       BL   @TTYOUT
+       DATA EPROMVER,0
+
+       MOVB @>F112,@SAVHBA
+       MOVB @SAVHBA+1,@>F112  ;page in the EPROM
+       MOV  @TIPCRU,R12
+       SBO  0
+
+       BL   @TTYOUT
+       DATA >401A,0      ;defined at this location
+       SBZ  0
+
+       MOVB @SAVHBA,@>F112
+       B    @EXIT
+
+
+SAVHBA DATA >00BA        save page
+;; TIPCRU DATA >1800     ;now set by findtipis. Enforce for debug if needed
+TIPCRU DATA >0000
+
+HALT   LI   R7,FILEH
+       BL   @TTYOUT
+       DATA HALTCONF,0
+       JMP  CONF1
+
+; consider countdown or spinner
+UPDATE LI   R0,BIGBUF
+CLRBFX CLR  *R0+         eliminate false positives
+       CI   R0,>2000
+       JL   CLRBFX
+
+       LI   R0,FILES
+       BL   @READFILE    R6=lines (no null)
+       MOV  R6,@LINES1
+
+       BL   @CMPARE      ;check for update
+       ABS  @UPWAIT      ;update pending in status?
+       JNE  UPDATT       ;yes, allow update process
+       B    @FROMUP      no. display only
+
+UPDATT LI   R7,FILEU
+       BL   @TTYOUT
+       DATA UPDATECONF,0
+       JMP  CONF1
+
+RESTART
+       LI   R7,FILER
+       BL   @TTYOUT
+       DATA REBOOTCONF,0
+       JMP  CONF1
+
+; common
+CONF1  BLWP @ALARM
+CONF1A LIMI 1
+       LIMI 0
+       CLR  R0           ;update jumps into here
+       XOP  @FIVE,0
+       JNE  CONF1A
+       ANDI R1,>5F00
+       CI   R1,'Y'*256
+       JEQ  CONF2
+
+       BL   @TTYOUT
+       DATA YESNO+1,1
+       B    @EXIT
+
+CONF2  BL   @TTYOUT
+       DATA YESNO,1
+
+       MOV  R7,R0
+       XOP  @IO,0
+       MOVB @2(R7),R1
+       JEQ  REST2             wrong file, incorrect size, etc
+       BL   @TTYOUT           show the error
+       DATA IOERR,0
+       B    @EXIT        for now...just get out
+
+REST2  MOV  R7,R0
+       MOVB @FCLOSE,*R0
+       XOP  @IO,0
+
+;halt
+CHKH1  CI   R7,FILEH          Halt?
+       JNE  CHKU1
+       BL   @TTYOUT
+       DATA SHUTDOWNINITIATED,0
+       B    @EXIT
+
+; update
+CHKU1  CI   R7,FILEU          update?
+       JNE  CHKR1
+       BL   @TTYOUT
+       DATA UPDATESTART,0
+       JMP  TIMER
+
+CHKR1  CI   R7,FILER          Reboot is last option
+;;     JNE  ??                no check at this time
+       BL   @TTYOUT
+       DATA REBOOTINITIATED,0
+;
+; allow CTRL-C just in case TIPI doesn't release
+;
+       LI   R0,SPINABORT
+       MOV  R0,@>00FE    ctrl-c
+
+; give user a spinner w/ctrl-c option
+
+TIMER  MOVB @>F112,@SAVHBA
+
+REST3  BL   @TTYOUT
+ROTR5  DATA ROTX4,2
+
+       INCT @ROTR5       next set of bytes
+       MOV  @ROTR5,R0    get current add
+       CI   R0,ROTX4+8  last set?
+       JL   REST3B       no
+       LI   R0,ROTX4     yes, reset
+       MOV  R0,@ROTR5    and push to display data
+
+REST3B LIMI 1            allow multitasking/timer
+       LIMI 0
+
+       LI   R1,400       delay for optics only
+REST3C DEC  R1
+       JNE  REST3C
+
+       MOVB @SAVHBA+1,@>F112  be sure no other task mucked around
+       MOV  @TIPCRU,R12       force CRU too
+       SBO  0                 card (back) on
+
+       MOVB @>5FF9,R0    cross fingers/wait for TIPI to respond
+       JNE  REST3
+
+REST4  BL   @TTYOUT
+       DATA DONE,0
+
+REST4A MOV  @TIPCRU,R12  ;enforced
+       SBZ  0            ;off
+       MOVB @SAVHBA,@>F112
+       CLR  @>00FE
+       B    @EXIT
+
+SPINABORT
+; add code to RESET tipi or Powerup?
+       LIMI 0            ;safety first
+       CLR  @>00FE
+       BL   @TTYOUT
+       DATA CTRLC,0
+       JMP  REST4A
+
+;------------------------
+
+ROTX4  BYTE '\',8        simple spinner
+       BYTE '-',8
+       BYTE '/',8
+       BYTE '|',8
+       DATA 0            ;8
+;
+; Config: this will be interactive if we expand program
+CONFIG LI   R0,FILEC
+       BL   @READFILE
+       BL   @DISPLAYFILE
+       JMP  EXIT
+
+;===========================
+; Show status file
+;===========================
+
+SHOWSTAT
+       LI   R0,BIGBUF
+CLRBF1 CLR  *R0+         eliminate false positives
+       CI   R0,>2000
+       JL   CLRBF1
+
+       LI   R0,FILES
+       BL   @READFILE    R6=lines (no null)
+       MOV  R6,@LINES1
+
+       ABS  @SHOWUPONLY  ;only show update pending?
+       JNE  SKIPM1       ;yes, skip the display
+
+       BL   @DISPLAYFILE ;show status file
+
+       BL   @TTYOUT
+       DATA CRLF2,0
+
+SKIPM1 BL   @CMPARE      ;check the version
+
+;;     ABS  @UPWAIT      ;update pending in status?
+;;     JNE  GOTUP1
+
+FROMUP BL   @TTYOUT      ;entry from "U" when no update. Messy. Sigh.
+       DATA KEY_VERSION+3,0
+
+       MOV  @PUTV2,@PUTV1 ;address of current ver - was there one?
+       JEQ  SKIPH1       no
+       MOV  @PUTV2,R7
+       MOVB *R7,R7       yes, get len of the record
+       JEQ  SKIPH1       0 len, skip
+       SRL  R7,8
+       MOV  R7,@PUTV1+2  store len for ttyout
+       BL   @TTYOUT
+PUTV1  DATA >FFFF,1      ;address and len self-modified above
+
+       ABS  @UPWAIT      ;did COMPARE find an update?
+       JNE  GOTUP1       ;yes
+
+SKIPH1 BL   @TTYOUT
+       DATA NOUPGRADE,0  ;no
+       JMP  EXIT
+
+
+GOTUP1 BL   @TTYOUT
+       DATA YESUPGRADE,0 ;yes
+
+       BLWP @ALARM
+
+       JMP  EXIT
+
+; Clean exit from utility
+EXIT   BL   @TTYOUT
+       DATA CRLF2,2
+
+       LI   R0,>06            Release mem
+       LI   R1,1
+       XOP  @MEM,0
+       BLWP @0                Thank MDOS for working so well, then exit
+
+; display the file
+DISPLAYFILE
+       MOV  R11,@DFEXIT+2
+       LI   R5,BIGBUF
+SHOWLP MOV  *R5+,@SHOWL
+       MOV  R5,@SHOWA
+       BL   @TTYOUT
+SHOWA  DATA 0            ;address of this line
+SHOWL  DATA 0            ;len
+
+       BL   @TTYOUT
+       DATA CRLF2,2
+
+       AI   R5,80        next line
+       DEC  R6
+       JNE  SHOWLP
+DFEXIT B    @0
+
+;
+PUTV2  DATA 0
+LINES1 DATA 0            total lines from R6
+UPWAIT DATA 0            ;0=no; 1=yes, update
+
+CMPARE MOV  R11,@CMEXIT+2
+       LI   R5,BIGBUF
+       MOV  @LINES1,R6   ;total lines to check
+       JEQ  CMEXIT       ;9.5.2026; in case 0 lines (shouldnt happen)
+       CLR  R7           ;clear current ver pointer
+
+CMPA1  LI   R3,KEY_VERSION+2  ;first get current version
+       MOVB *R3+,R4      ;len
+       SRL  R4,8         ;of ver text
+       MOV  *R5+,R1      len of line
+       MOV  R5,R2        address of line
+
+CMPA1A CB   *R2+,*R3+
+       JNE  CMPA2
+       DEC  R4           any more to compare
+       JNE  CMPA1A
+         MOV  R2,R7        ;save ^version
+         MOV  R2,@PUTV2    ;save for the simple display
+         JMP  CMPA3
+
+CMPA2  AI   R5,80
+       DEC  R6
+       JNE  CMPA1        ;end first loop (no current ver found)
+
+; second compare
+CMPA3  LI   R5,BIGBUF
+       MOV  @LINES1,R6   ;total lines to check
+       CLR  R8           ;clear update ver pointer
+CMPA4  LI   R3,KEY_LATEST+2  ;first get current version
+       MOVB *R3+,R4      ;len
+       SRL  R4,8         ;of ver text
+       MOV  *R5+,R1      len of line
+       MOV  R5,R2        address of line
+CMPA4A CB   *R2+,*R3+
+       JNE  CMPA5
+       DEC  R4           any more to compare
+       JNE  CMPA4A
+       MOV  R2,R8        ;save ^version
+       JMP  CMPA6
+
+CMPA5  AI   R5,80
+       DEC  R6
+       JNE  CMPA4        ;end first loop
+;dropthrough=no latest ver found (should not happen)
+
+; Now try to compare the two
+; if either address is 0, skip update
+CMPA6  MOV  R7,R7
+       JEQ  CMEXIT       current=blank, no update (should it force it?)
+       MOV  R8,R8
+       JEQ  CMEXIT       latest=blank, exit
+
+; Is version literal compare or str-to-num compare
+; scan x.yy (4 char) + 1 loop starter
+       LI   R6,4+1
+CMPA7  DEC  R6           none left, exit
+       JEQ  CMEXIT
+       CB   *R7+,*R8+    current<=latest
+       JHE  CMPA7
+       SETO @UPWAIT      ;update waiting
+
+CMEXIT B    @0
+
+; Read the file and buffer it into memory
+; Watch out for maximum size.. should check boundaries in next rev
+;
+;In:  LI R0,PAB
+;     BL @READFILE
+;
+;Out: R6=lines read
+;     FULLBUF, if at limit
+READFILE
+OPEN1  MOV  R0,R7
+       MOVB @FOPEN,*R7
+       XOP  @IO,0
+
+       MOVB @2(R7),R1
+       JEQ  READ0             wrong file, incorrect size, etc
+       BL   @TTYOUT           show the error
+       DATA IOERR,0
+       B    @EXIT        for now...just get out
+
+; Read loop
+READ0  LI   R5,BIGBUF    ;<len><80 charmax>
+       CLR  R6           ;record counter
+READ1  MOV  R7,R0        reset pab
+       MOVB @FREAD,*R7
+       MOV  R5,@4(R7)
+       INCT @4(R7)
+       XOP  @IO,0
+       MOVB @2(R7),R1
+       JEQ  READ2
+;      error - no more rec vs. error...
+       JMP  READ3
+
+READ2  MOV  @12(R7),*R5+
+       JEQ  READ1             if 0, skip and read again
+       AI   R5,80             next line
+       INC  R6                got one line
+       CI   R6,50
+       JL   READ1
+       SETO @FULLBUF          no more room; stop and close
+       JMP  READ3
+;<len word><max 80>
+
+; done with read
+READ3  MOV  R7,R0
+       MOVB @FCLOSE,*R0
+       XOP  @IO,0
+       RT
+
+;TEST CODE 12.24
+;      LI   R3,CONFIG_KEY
+;      MOV  *R3+,R9       save next address
+;      MOVB *R3+,R8
+;      JEQ  SCAN
+
+
+;
+; Config primary keys
+;
+KEY_VERSION DATA KEY_LATEST
+            BYTE 8
+            TEXT 'VERSION='
+            BYTE 0
+KEY_LATEST  DATA KEY_RELDATE
+            BYTE 7
+            TEXT 'LATEST='
+            BYTE 0
+KEY_RELDATE DATA KEY_IPWLAN0
+            BYTE 8
+            TEXT 'RELDATE='
+            BYTE 0
+KEY_IPWLAN0 DATA 0
+            BYTE 9
+            TEXT 'IP_WLAN0='
+            BYTE 0
+
+*-------------------------------------------------------------------------------
+* Prints the HEX
+* representation starting with the byte pointed to by R3.  R7 contains the
+* number of bytes to print (starting at R3).
+*
+PRTHEX MOV  *R11+,R3          get the starting location
+       MOV  *R11+,R7          get the number of bytes to print
+       LI   R0,>27            TTYOUT
+       LI   R1,WS+12          use R6 as the location to print from
+       LI   R2,1              one char to print
+
+PRT2   MOVB *R3+,R5           get the next byte
+       SRL  R5,8              make it a word value
+       CLR  R4                clear R4 for the divide
+       DIV  @SIXTEEN,R4       divide this by sixteen
+       MOVB @HEXDEC(R4),R6    get the ASCII character (pointer to by R4)
+       XOP  @VIDEO,0          print it
+       MOVB @HEXDEC(R5),R6
+       XOP  @VIDEO,0
+       MOV  R7,R6             move R7 (byte value)
+       ANDI R6,>0001          mask all but bit 1
+       JEQ  NOSPACE           if zero, jump (must have been an even byte)
+       MOVB @H32,R6           ah-ha.. odd!  let's print a space to separate the
+       XOP  @VIDEO,0          words of hex.
+NOSPACE
+       DEC  R7                any more to do?
+       JNE  PRT2              yup
+       RT                     no, return
+
+**************************
+* MDOS write tty routine *
+**************************
+TTYOUT MOV  *R11+,R1     address
+       MOV  *R11+,R2     len (or null term)
+       LI   R0,>0027
+       XOP  @VIDEO,0
+       RT
+
+ALARM  DATA >F020,$+2
+       LI   R0,>33
+       LI   R1,800
+       LI   R2,802
+       LI   R3,200
+       LI   R4,>0003
+       LI   R5,>0F00
+       LI   R6,>000F     NOISE off
+       LI   R7,45        60ths of second (.5 sec)
+       XOP  @VIDEO,0
+       RTWP
+
+; --- tipi detect --
+
+       COPY "FINDTIPIS"
+
+; -- end tipi detect
+
+*
+* end of code, data follows
+*
+PUTV3  TEXT 'TIPI Version '
+       BYTE 0
+
+TITLE1 BYTE 13,10
+       TEXT 'TSTAT v1.3   (? for options)    5 September 2026'
+       BYTE 13,10,10,0
+
+;USAGE  BYTE 13,10
+USAGE
+    TEXT 'Usage:  TSTAT [?RHUCSE]   {Restart Halt Update Config Status Eprom}'
+       BYTE 13,10,10
+       TEXT '[R]estart the RPi'
+       BYTE 13,10
+       TEXT '[H]alt the RPi to prepare for poweroff'
+       BYTE 13,10
+       TEXT '[U]pdate the TIPI code on the RPi'
+       BYTE 13,10
+       TEXT '[C]onfig - shows the config file'
+       BYTE 13,10
+       TEXT '[S]tatus - shows the status file'
+       BYTE 13,10
+       TEXT '[E]prom  - shows the EPROM time-date revision'
+       BYTE 13,10
+       BYTE 0
+
+IOERR  BYTE 13,10
+       TEXT 'ERROR: Unable to access RPi device!'
+       BYTE 13,10,0
+
+UPDATECONF
+       TEXT 'Proceed with TIPI update? '
+       BYTE 0
+
+YESNO  TEXT 'YN'
+       BYTE 0
+
+UPDATESTART
+       BYTE 13,10
+       TEXT 'TIPI Update in process...'
+       BYTE 0
+
+REBOOTCONF
+       TEXT 'RESTART RPi now?  '
+       BYTE 0
+
+HALTCONF
+       TEXT 'SHUTDOWN RPi now? Are you sure? '
+       BYTE 0
+
+REBOOTINITIATED
+       BYTE 13,10
+       TEXT 'TIPI Restart in process...'
+       BYTE 0
+
+SHUTDOWNINITIATED
+       BYTE 13,10
+       TEXT 'RPi Shutdown Initiated'
+       BYTE 13,10
+       TEXT 'Please wait ~45 seconds to power off your device.'
+       BYTE 13,10,0
+
+DONE   TEXT 'complete!'
+       BYTE 13,10,0
+
+CTRLC  TEXT '^C, program halted'
+       BYTE 13,10,0
+
+
+NOUPGRADE
+       TEXT ' - No update available'
+       BYTE 13,10,0
+
+YESUPGRADE
+       TEXT ' ** TIPI Update available! Use option [U]'
+       BYTE 13,10,0
+
+EPROMVER
+       TEXT 'TIPI EPROM: '
+       BYTE 0
+
+HELLO  BYTE 13,10
+       TEXT 'If you are reading this, you are doing more than running me!'
+       BYTE 9
+
+CRLF2  BYTE 13,10,0           *cr/lf combo for ttyout
+H32    BYTE >20
+HFF    BYTE >FF
+FIVE   DATA 5
+VIDEO  DATA 6            video xop
+MEM    DATA 7            memory manager xop
+IO     DATA 8            i/o xop
+UTIL   DATA 9            utility xop
+HEXA   DATA 10
+
+; File opcodes
+FOPEN  BYTE >00
+FCLOSE BYTE >01
+FREAD  BYTE >02
+FWRITE BYTE >03
+
+SIXTEEN     DATA 16
+HEXDEC TEXT '0123456789ABCDEF'
+;
+; Consolidate to one PAB with a call/etc later if desired
+;      We have plenty of space so we'll keep things simple for now
+;      This also facilitates testing the functions using a file on disk
+;
+FILEC  DATA >0014,>0000,FILEBUF,0,0,0,0
+       BYTE 0,9
+       TEXT 'PI.CONFIG   '
+
+FILES  DATA >0014,>0000,FILEBUF,0,0,0,0
+       BYTE 0,9
+       TEXT 'PI.STATUS   '
+;;     TEXT 'DSK5.TEST   '    ;TYPE PI.STATUS>DSK5.TEST, Edit, and test
+
+FILEU  DATA >0014,>0000,FILEBUF,0,0,0,0
+       BYTE 0,10
+       TEXT 'PI.UPGRADE  '
+
+; >12 is output; >14 input
+FILEH  DATA >0012,>0000,FILEBUF,0,0,0,0
+       BYTE 0,11
+       TEXT 'PI.SHUTDOWN '
+
+FILER  DATA >0012,>0000,FILEBUF,0,0,0,0
+       BYTE 0,9
+       TEXT 'PI.REBOOT   '
+       DATA 0
+
+; don't cross >2000 boundary... got about 2k
+; I should add some protection to this some day.
+
+       BYTE 0
+LEN    BYTE 0
+FNAME  EQU  $
+WORK   EQU  FNAME+50
+PGETBL       EQU  WORK+100
+FILEBUF      EQU  PGETBL+264
+BIGBUF       EQU  FILEBUF+256   80char/line buffer (don't exceed 80*50=4k)
+*----------
+       END
+
