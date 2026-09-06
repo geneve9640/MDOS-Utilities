@@ -1,0 +1,734 @@
+********************************************************************************
+* Backup Bit Remover - MDOS Edition
+* Written March 15, 2004 by Timothy A Tesch @10:23pm
+*
+*
+* IDea: If no device is entered, show menu to user just like TI version.
+*      also show the command line availability. Let user choose ;)))
+*      After running in drive-pick mode, clear screen to start new session.
+*      Should require very little additional code.  :)
+*
+*      Update TI version to do subdirs?
+*
+*      BBRM              Display options
+*      BBRM <drive>      Floppy from 1 to 9 or drive letter
+*
+*
+*      Operation:
+*           Read Sector 0
+*  SUB1     Read Sector 1 and get FDIR
+*           Update sectors
+*              Read next sector
+*              IS the bit set?
+*                        NO - skip
+*                        YES - remove it
+*                             Write sector
+*              Loop til complete
+*
+*           Phase 2: check for subdirectories (3 max)
+*                        Call SUB1 for each FDIR
+*
+*-------------------------------------------------------------------------------
+WS     EQU  >F000        my workspace
+
+START  LWPI WS          LET'S LOAD OUR WORKSPACE
+       LIMI 0            turn off those interrupts!
+
+       BL   @TTYOUT
+       DATA TITLE1,0
+
+       MOV  @DEBUGFLAG#1,@DEBUGFLAG#1        1=debug
+       JEQ  MAIN3                            skip debug warning
+       BL   @TTYOUT
+       DATA WARNDEBUG,0
+
+MAIN3  BLWP @CRCME       Return R0: CRC success/failure;  R1: Computed CRC
+       DATA PROGSTART
+       DATA PROGEND
+       DATA >9640
+
+PROGSTART
+       MOV  R0,R0        0=OK; 1=CRC Failed
+       JEQ  GETCLI
+
+       LI   R0,>27       CRC FAILED. Warn User
+       LI   R1,CRCFAIL
+       CLR  R2
+       XOP  @VIDEO,0
+
+       MOV  @DEBUGFLAG#1,@DEBUGFLAG#1        debugging?
+       JEQ  OUTNOW                           Yes-continue.  No (0)- EXIT
+
+       BL   @PRTHEX           PRINT CRC
+       DATA CALCCRC,2
+       JMP  GETCLI            CONTINUE ON...
+
+OUTNOW BLWP @0
+
+
+***********************
+* GET THE FILE FROM CLI
+*
+GETCLI LI   R0,60*256         60 bytes for WORK length
+       LI   R1,WORK-1         patch it
+       MOVB R0,*R1+           crunch command line and move it to WORK
+       MOV  @>0128,R2         get command line argument address
+*      JEQ  NOGOT             if no arguments
+       JEQ  INTERACT1
+       B    @GETCL2            Argument present; don't check for input
+
+INTERACT1
+       SETO @INTERACTIVE
+
+       BL   @TTYOUT      Tell user what program does and how to use it
+       DATA USAGE,0
+       BL   @TTYOUT      Tell them about interactive mode
+       DATA REQUESTDRIVE#,0
+
+INTERACT2
+       BL   @TTYOUT           Request the drive letter
+       DATA REQUESTDRIVE#2,0
+
+KEYRDO LI   R0,4
+       LI   R1,>FF00
+       XOP  @KEY,0
+       JNE  KEYRDO       No key pressed; loop
+
+       ANDI R1,>7F00
+       CI   R1,27*256   ESCAPE?
+       JNE  KEYD1
+
+       BL   @TTYOUT
+       DATA ENDOFLINE,0
+
+       BLWP @0
+
+
+KEYD1  CI   R1,'1'*256
+       JL   KEYRDO
+       CI   R1,'9'*256
+       JH   KEYRDO
+       MOVB R1,@DSKFOR+4      place drive number into device string
+
+       BL   @TTYOUT           Print the key pressed
+       DATA DSKFOR+4,1
+
+       LI   R1,INPUTDEVICE
+       LI   R2,DSKFOR
+PUMP1  MOVB *R2+,*R1+         Move device name into input buffer w/length
+       CI   R2,DSKFOR+7       done with LEN, Device, and null
+       JNE  PUMP1             no
+*      RT                     end routine
+       B    @DISPLAYDEVICE    *Bypass* CLI; go directly to routine
+
+DSKFOR BYTE >05
+       TEXT 'DSKx.'
+       BYTE 0
+       EVEN
+REQUESTDRIVE#
+       BYTE 13,10,10
+       TEXT 'You have chosen to run this program interactively.'
+       BYTE 0
+REQUESTDRIVE#2
+       BYTE 13,10,10
+       TEXT 'Select your device number (1-9) or ESCape to exit: '
+       BYTE 0
+
+ENDOFLINE
+       BYTE 13,10,10
+       TEXT '* Program Terminated *'
+       BYTE 13,10,0
+       DATA 0
+
+GETCL2 CB   @2(R2),@-1(R1)    see if command line is too long
+       JHE  NOGOT             if too long
+       MOV  R1,R5             else save address of WORK to R5
+       DEC  R5                point to ^length
+       MOVB @2(R2),R6         get CLI argument length
+       SRL  R6,8              make it a word
+       INCT R6                add two
+*
+* nodes look like this:
+*      <word pointer to next node> <6 bytes data>
+*
+NXTNOD MOV  R2,R3             copy pointer address
+       INCT R3                point past the pointer
+       MOV  R2,R4             copy it again, but now
+       AI   R4,8              add 8 so we are pointing to LAST byte in node
+GETNOD MOVB *R3+,*R5+         move a byte
+       DEC  R6                have we moved all bytes as per the length node?
+       JEQ  GOTCMD            yes, end this now
+
+       C    R3,R4             no, are we at the end of this node?
+       JL   GETNOD            not yet, get next byte
+       MOV  *R2,R2            Yes, point to next node and start over
+       JMP  NXTNOD            do it
+*
+*-------------------------------
+* At this point we have all the data from the CLI, but we need to parse
+* through it for our data.
+*
+* First five chars should be our input device.  If not, we fail
+*
+
+GOTCMD MOVB @WORK-1,R1   length of argument
+       JEQ  NOGOT        if no arg
+       SRL  R1,8         else make it a word
+
+       CI   R1,2         single character?
+       JL   NOGOT        exit
+
+       INC  R1           and add 1 for the loop conter
+*----
+
+* HOW do you parse for directory only; parsing seems to be adding current
+* folder + filename. by adjusting length, i am masking the error condition
+* present when running from floppy and specifying a file or wildcard.
+*
+* Solution: change maxlen in INPUTDEVICE before parse to 5. Disallow files,etc
+*           also, check above for len of 1.
+
+       LI   R7,WORK
+       LI   R0,8         parse operation, first node
+       MOV  R7,R1        buffer
+       MOVB @MAXLEN+1,@INPUTDEVICE
+       MOVB @MAXINPUT+1,@INPUTDEVICE         only allow 5 characters
+       LI   R2,INPUTDEVICE    buffer
+       CLR  R3
+       XOP  @UTIL,0           parse
+*      MOV  R1,R1
+*      JNE  NOGOT        error condition. path too long, etc. (fails on DSKx.)
+*                        hence, the next check
+
+       CB   @MAXINPUT+1,@INPUTDEVICE         10.25
+       JNE  NOGOT
+
+       MOVB @INPUTDEVICE+4,R1
+       SRL  R1,8
+       CI   R1,'9'
+       JH   NOGOT
+       CI   R1,'1'
+       JL   NOGOT
+
+*      LI   R1,>0500          adjust length
+*      MOVB R1,@INPUTDEVICE
+       CLR  @INPUTDEVICE+6    make sure a NULL is present at 6th byte
+       MOVB @PERIOD,@INPUTDEVICE+5           put a period here
+       LI   R1,INPUTDEVICE+1
+       LI   R2,DEVDSK
+       CB   *R1+,*R2+
+       JNE  NOGOTF       failed on first char
+       CB   *R1+,*R2+
+       JNE  NOGOTF       failed on 2nd char
+       CB   *R1+,*R2+
+       JEQ  DISPLAYDEVICE  succeeded
+
+NOGOTF BL   @TTYOUT
+       DATA BADUS2,0
+       BL   @TTYOUT
+       DATA BADUS1,0
+       B    @EXIT
+
+NOGOT  BL   @TTYOUT      not a DSK device. Exit
+       DATA USAGE,0      show usage, first
+       B    @EXIT
+*
+*ALL DONE PARSING, GETTING NAME, ETC.  NOW TO THE GOOD STUFF!
+*----------------------------------------------------------------------------
+*
+*  <device> <outputfile>
+*
+*      1) Device must be FIVE characters in length
+*      2) Device must be "DSK"  with device #1-9, and a period
+*
+DISPLAYDEVICE
+       BL   @TTYOUT
+       DATA OPENING,0    'reading file index from'
+
+       BL   @TTYOUT
+       DATA INPUTDEVICE+1,5
+*      BL   @TTYOUT
+*      DATA PERIOD,0     show the device
+
+       CLR  @INPAB+6     Tell DSR we want sector 0
+       CLR  @INPAB+2     clear buffer/error return
+       LI   R0,DSKSEC0
+       MOV  R0,@INPAB+4  set buffer location
+       LI   R0,1
+       MOV  R0,@INPAB+12
+
+       MOVB @BREAD,@INPAB     10.12.04 - FORGOT THIS; if last op was write, BBRM
+*                                        blew away next disk's sector 0!!! UGH
+       LI   R0,INPAB     get sector 0
+       XOP  @IO,0        do it
+       MOVB @INPAB+2,R1        check for an error
+       JEQ  READOK            wrong file, incorrect size, etc
+
+       LI   R1,INERR
+       JMP  EXITERROR    ERROR
+*
+* LOOP AROUND SECTOR 0 HERE
+READOK
+       CLR  @STAT_TOTFIXED
+       CLR  @STAT_TOTFILES
+       CLR  @STAT_TOTSKIP
+       CLR  @STAT_TOTSUBDIR
+
+       BL   @TTYOUT
+       DATA DSKVOLNAME,0
+       BL   @TTYOUT
+       DATA DSKSEC0,10   Display Volume name
+
+       BL   @TTYOUT      next line...
+       DATA CRLF2,0
+
+       LI   R6,1         [ROOT] SUBDIRECTORY
+       BL   @RESETFDIR
+       MOV  R1,R1
+       JNE  EXITERROR                        error condition
+
+       MOV  @DSKSEC0+DIRLOC1,R6              FIRST SUB - PRESENT?
+       JEQ  CHECKDONE                        NO. No other Subdirs should exist
+
+       BL   @TTYOUT
+       DATA DSKSUBNAME,0
+       BL   @TTYOUT
+       DATA DSKSEC0+DIRLOC1-10,10               Display subdir name
+       BL   @TTYOUT
+       DATA CRLF2,0
+
+       INC  @STAT_TOTSUBDIR
+       BL   @RESETFDIR                       got it.. clean it out
+       MOV  R1,R1
+       JNE  EXITERROR
+
+CHECK2 MOV  @DSKSEC0+DIRLOC2,R6              SECOND SUB - PRESENT?
+       JEQ  CHECKDONE                        No. No others should exist
+
+       BL   @TTYOUT
+       DATA DSKSUBNAME,0
+       BL   @TTYOUT
+       DATA DSKSEC0+DIRLOC2-10,10
+       BL   @TTYOUT
+       DATA CRLF2,0
+
+       INC  @STAT_TOTSUBDIR
+       BL   @RESETFDIR                       got it... clean
+       MOV  R1,R1                            error?
+       JNE  EXITERROR                        yes
+
+
+CHECK3 MOV  @DSKSEC0+DIRLOC3,R6              check last sub
+       JEQ  CHECKDONE                        No subdir. EXIT
+
+       BL   @TTYOUT
+       DATA DSKSUBNAME,0
+       BL   @TTYOUT
+       DATA DSKSEC0+DIRLOC3-10,10               Display Subdir name
+       BL   @TTYOUT      next line...
+       DATA CRLF2,0
+
+       INC  @STAT_TOTSUBDIR
+       BL   @RESETFDIR                       got it..clean
+       MOV  R1,R1                            error?
+       JNE  EXITERROR                        yes
+
+
+CHECKDONE
+
+WRITEOK
+       BL   @TTYOUT
+       DATA SUCCESS,0
+*------------------------------
+*      redo on same device?
+*
+       ABS  @INTERACTIVE      allow a REDO?
+       JEQ  EXIT              no
+       B    @INTERACT2        Start all over
+
+EXITERROR
+       LI   R0,>27       exit with error.  R1 contains text pointer
+       CLR  R2
+       XOP  @VIDEO,0
+
+       ABS  @INTERACTIVE
+       JEQ  EXIT
+       B    @INTERACT2
+
+EXIT   BL   @TTYOUT           normal exit
+       DATA CRLF2,2           with a CRLF
+       BLWP @0                Thank MDOS for working so well, then exit
+
+**************************
+* MDOS write tty routine *
+**************************
+TTYOUT LI   R0,>27
+       MOV  *R11+,R1
+       MOV  *R11+,R2
+       XOP  @VIDEO,0
+       RT
+
+*********************************************
+* R6-sector of FDIR to work from
+* Call BL  @RESETFDIR
+* R1-  0=OK;  <>0 points to failure message
+*********************************************
+
+RESETFDIR
+       LI   R7,DSKFDIR   buffer location of FDIR
+       LI   R8,1         number of sectors to read/writee
+       LI   R9,DSKFDR    location of sector read/write buffer
+
+       MOV  R6,@INPAB+6       Read the FDIR pointed to by R6
+       MOV  R7,@INPAB+4       set the buffer load address for this FDIR
+       MOV  R8,@INPAB+12      1 SECTOR ONLY
+       LI   R0,INPAB          PAB
+       MOVB @BREAD,@INPAB
+       XOP  @IO,0             READ
+       MOVB @INPAB+2,R1       error?
+       JNE  RESETFDIRFAILREAD yes, exit
+
+* main loop for this FDIR
+FDIRMAINLOOP
+       CI   R7,INPAB+256      past the last FDIR pointer?
+       JEQ  RESETFDIRDONE     Yes, exit successfully
+
+       MOV  *R7,@INPAB+6     point to the next sector
+       JEQ  RESETFDIRDONE     no more. Exit this loop
+
+       INC  @STAT_TOTFILES
+
+       LI   R0,>27       tell user we are reading the file
+       LI   R1,FILERD
+       CLR  R2
+       XOP  @VIDEO,0
+
+       LI   R0,INPAB
+       MOV  R9,@INPAB+4       buffer for FDR
+       MOV  R8,@INPAB+12      1 SECTOR ONLY
+       MOVB @BREAD,@INPAB     Read
+       XOP  @IO,0
+       MOVB @INPAB+2,R1
+       JNE  RESETFDIRFAILREAD Could not read
+
+       LI   R0,>27       display filename
+       LI   R1,DSKFDR
+       LI   R2,10
+       XOP  @VIDEO,0
+
+       MOVB @DSKFDR+12,R0     get the right byte
+       ANDI R0,>EF00          reset the bit
+       CB   @DSKFDR+12,R0     is it still the same?
+       JEQ  SKIPWRITE         yes, no need to write back to disk
+       MOVB R0,@DSKFDR+12     no, let's prepare to write!
+
+       INC  @STAT_TOTFIXED
+
+       LI   R0,>27       tell user we are writing the file
+       LI   R1,FILEWR
+       CLR  R2
+       XOP  @VIDEO,0
+*      LI   R0,>27       no need to display file again
+*      LI   R1,DSKFDR
+*      LI   R2,10
+*      XOP  @VIDEO,0
+
+       LI   R0,INPAB
+       MOV  R9,@INPAB+4       FDR
+       MOV  *R7,@INPAB+6      reset PAB to current sector (MDOS inc's this on rd
+       MOV  R8,@INPAB+12      1 SECTOR ONLY
+       MOVB @BWRITE,@INPAB     Read
+       XOP  @IO,0
+       MOVB @INPAB+2,R1
+       JNE  RESETFDIRFAILWRITE  Could not write
+
+SKIPWRITE
+*      LI   R0,>27
+*      LI   R1,FILESTAT
+*      LI   R2,17
+*      XOP  @VIDEO,0     write the filename to the screen
+*
+*      LI   R0,>27
+*      LI   R1,CRLF2
+*      LI   R2,1
+*      XOP  @VIDEO,0     write a carriage return to prepare for next file
+
+       INCT R7           do it here to avoid MDOS PAB returning sector+1 @6
+       JMP  FDIRMAINLOOP  next file!
+
+
+RESETFDIRDONE
+       CLR  R1           success; indicated in R1
+       RT
+RESETFDIRFAILREAD
+       LI   R1,FAILREAD  error message pointer for TTYYOUT
+       RT
+RESETFDIRFAILWRITE
+       LI   R1,FAILWRITE
+       RT
+
+
+******************************************************
+* end of code, data follows
+*
+
+OPENING
+       BYTE 13,10,10
+       TEXT 'Reading Sector 0 and 1 from '
+       BYTE 0
+FAILREAD
+       BYTE 13,10,10
+       TEXT '* ERROR: Unable to READ sector! Operation Halted.'
+       BYTE 0
+
+FAILWRITE
+       BYTE 13,10,10
+       TEXT '* ERROR: Unable to WRITE sector!  Operation Halted.'
+       BYTE 0
+
+FILE   BYTE 13
+       TEXT 'File: '
+       BYTE 0
+
+FILERD BYTE 13
+       TEXT '   Checking File: '
+       BYTE 0
+
+FILEWR BYTE 13
+       TEXT '   Updating File: '
+       BYTE 0
+
+DEVDSK TEXT 'DSK'
+
+DSKVOLNAME  BYTE 13,10
+            TEXT 'Volume: '
+            BYTE 0
+
+DSKSUBNAME  BYTE 13,10
+            TEXT 'Subdirectory: '
+            BYTE 0
+
+TITLE1
+       BYTE 13,10
+       TEXT 'BBRM v2.0 (c)2004 by Timothy A Tesch  (12 Oct 2004)'
+       BYTE 13,10
+       TEXT '==================================================='
+       BYTE 0
+
+USAGE  BYTE 13,10
+       TEXT 'Backup Bit Remover for MDOS clears/resets the Myarc backup/archive'
+       BYTE 13,10
+       TEXT 'bit found in byte 12 of each FDR.  This bit when set may disrupt'
+       BYTE 13,10
+       TEXT 'some disk or RAMdisk operations and programs.  BBRM fixes all'
+       BYTE 13,10
+       TEXT 'files in the root directory and subdirectories'
+       TEXT ' on floppy-style devices.'
+BADUS1 BYTE 13,10,10
+       TEXT 'Usage: BBRM <Floppy Disk Input Device>'
+       BYTE 13,10
+       TEXT '       BBRM A:
+       BYTE 13,10
+       TEXT '       BBRM DSK6.
+       BYTE 13,10,0
+
+INERR  BYTE 13,10,10
+       TEXT 'ERROR: Could not read sector 0!  Operation Halted.'
+       BYTE 0
+
+BADUS2 BYTE 13,10
+       TEXT 'WARNING: Incorrect DEVICE specified!'
+       BYTE 0
+
+WARNDEBUG
+       BYTE 13,10
+       TEXT 'WARNING: Debug Mode *Enabled*'
+       BYTE 0
+
+SUCCESS
+       BYTE 13,10,10
+       TEXT 'Success!  Backup Bit reset on all files.'
+       BYTE 13,10,0
+
+STAT1  BYTE 13,10
+       TEXT 'Statistics: '
+
+       TEXT 'BBRM reviewed the ROOT directory and xxxx'
+       TEXT ' subdirectories.'
+       TEXT 'BBRM removed the backup bit from xxx of xxx files'
+       TEXT 'xxx files did not require fix'
+
+PERIOD BYTE '.','.','.',0
+
+CRLF2  BYTE 13,10,0           *cr/llf combo for ttyout
+H32    BYTE >20
+HFF    BYTE >FF
+KEY    DATA 5
+VIDEO  DATA 6            video xop
+MEM    DATA 7            memory manager xop
+IO     DATA 8            i/o xop
+UTIL   DATA 9            utility xop
+HEXA   DATA 10
+
+*
+* Statistics:
+*
+STAT_TOTFILES            DATA 0
+STAT_TOTFIXED            DATA 0
+STAT_TOTSKIP             DATA 0
+STAT_TOTSUBDIR           DATA 0
+
+INTERACTIVE DATA 0       0=NO; 1=YES (BATCH)
+
+BREAD  BYTE >0A
+BWRITE BYTE >0B
+*----------------------------------------------------------------------
+MAP    BSS  10
+WORK   BSS  100
+DSKSEC0 BSS 256          sector 0
+DSKFDIR BSS 256          FDIR (sector 1 or subdir sectors)
+FILESTAT BYTE 13
+       TEXT 'File: '
+DSKFDR BSS 256          FDR for each file
+       DATA 0            just in case
+
+MAXLEN DATA 40
+MAXINPUT    DATA 5
+*
+*                      |->STARTING ADDRESS (changes during read/write)
+*                      |              |->SECTORS TO READ
+INPAB  DATA >0A00,0,DSKSEC0,>0000,0,0,1
+       BYTE 0
+INPUTDEVICE
+       BYTE 0
+       TEXT 'XXXXX                                   ' 40
+* XXXXX SO WE DON'T GET A FALSE DRIVE IF INPUT IS TOO SHORT.
+
+       DATA 0            for Genasm
+
+* SUBDIRECTORY CONFIGURATION:
+*
+* [dirname1][ptr1][dirname2][ptr2][dirname3][ptr3]
+*
+* >0000 in the pointer location indicates no further subdirectories.
+*      Subdirectories are sorted by the DSR.  The name (10 bytes) is not
+*      always blanked out when a directory is deleted; only the ptr is zero'd.
+*
+DIRLOC1 EQU 30           first subdir ptr (text is -10)
+DIRLOC2 EQU 42           2nd subdir ptr (text is -10)
+DIRLOC3 EQU 54           3rd subdir ptr (text is -10)
+
+PROGEND DATA 0           END of program and CRC check
+
+*
+* Place OUTSIDE of CRC area
+*
+DEBUGFLAG#1 DATA >9641        0=NORMAL OPERATION; <>0 debug
+
+
+***************************************************************************
+* PURPOSE:
+*      Provide a means to confirm program loaded properly and/or was not
+*      modified. Should be used to verify disk utilities (ie, sector editors,
+*      drive formatters,etc) are not corrupt before use.
+*
+* Note: should routine exit or simply return success/failure?
+*
+*
+* ASSUMPTIONS:
+*      1. CRC Start/End locations within 64K visible memory.
+*      2. CRC computed with same algorithm
+*      3. Workspaces are NOT part of the CRC's program code (induces changes)
+*
+* REFerences may be required:
+*      CRCFAIL
+*
+* Usage:
+*      BLWP @CRCME
+*      DATA ^start-of-crc-area
+*      DATA ^end-of-crc-area
+*      DATA CRCVALUE     (>9640, update via sector utility at program release)
+*
+* RETURNS:
+*      R0:  0=CRC pass;  1=CRC Fail
+*      R1:  <computed CRC>
+*      calccrc:  <computed CRC; duplicate of R1. Eliminate?>
+*
+CRCMEWS DATA 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 ensure even boundary
+CALCCRC DATA 0           CALCULATED CRC
+CRCFAIL BYTE 13,10
+        TEXT 'WARNING: '
+        TEXT 'Program is corrupt or has been modified. Operation Canceled!'
+        BYTE 13,10,0
+        DATA 0
+
+CRCME   DATA CRCMEWS,$+2
+        MOV *R14+,R0     START
+        MOV *R14+,R2     END
+
+       CLR  R8
+CRCN1  BL   @CRCUPD
+       C    R0,R2
+       JL   CRCN1
+
+       CLR  @0(R13)      Return R0=0 for CRC Match (OK)
+       MOV  R8,@2(R13)   Move CRC Value into callers R1
+       MOV  R8,@CALCCRC
+       C    *R14+,R8     Compare with third data statement
+       JEQ  CRCEND       CRC OK, return
+       SETO @0(R13)      Flag=1 = BAD CRC
+
+CRCEND RTWP
+*
+* Old Faithful
+*
+CRCUPD MOVB *R0+,R1
+       ANDI R1,>FF00
+       XOR  R1,R8
+       MOV  R8,R1
+       SRL  R1,4
+       XOR  R8,R1
+       ANDI R1,>FF00
+       SRL  R1,4
+       XOR  R1,R8
+       SRC  R1,7
+       XOR  R1,R8
+       SWPB R8
+       RT
+
+*-------------------------------------------------------------------------------
+* This may be a bit different, but I got it to work.  Prints the HEX
+* representation starting with the byte pointed to by R3.  R7 contains the
+* number of bytes to print (starting at R3).
+*
+HEXDEC  TEXT '0123456789ABCDEF'
+SIXTEEN DATA 16
+
+PRTHEX MOV  *R11+,R3          get the starting location
+       MOV  *R11+,R7          get the number of bytes to print
+       LI   R0,>27            TTYOUT
+       LI   R1,WS+12          use R6 as the location to print from
+       LI   R2,1              one char to print
+
+PRT2   MOVB *R3+,R5           get the next byte
+       SRL  R5,8              make it a word value
+       CLR  R4                clear R4 for the divide
+       DIV  @SIXTEEN,R4       divide this by sixteen
+       MOVB @HEXDEC(R4),R6    get the ASCII character (pointer to by R4)
+       XOP  @VIDEO,0          print it
+       MOVB @HEXDEC(R5),R6
+       XOP  @VIDEO,0
+       MOV  R7,R6             move R7 (byte value)
+       ANDI R6,>0001          mask all but bit 1
+       JEQ  NOSPACE           if zero, jump (must have been an even byte)
+       MOVB @H32,R6           ah-ha.. odd!  let's print a space to separate the
+       XOP  @VIDEO,0          words of hex.
+NOSPACE
+       DEC  R7                any more to do?
+       JNE  PRT2              yup
+       RT                     no, return
+
+*---------------------------------------------------------
+       END
+
+
