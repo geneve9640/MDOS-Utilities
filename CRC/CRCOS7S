@@ -1,0 +1,308 @@
+********************************************************************************
+; CRCOS7S   Geneve OS File integrity verification
+;           (C)1994,2024 T.Tesch (InsaneMultitasker : AtariAge)
+;
+;           CRaCk-it! v1.0 was written 4 March 1994 @3:36am
+;           Various iterations were released as MDOS was updated/grew
+;
+; OVERVIEW:
+;      A seprate CRC value installer generates a 2-byte CRC value for each
+;      of the 8K segments of the OS file.  The CRC values are embedded within
+;      the OS to help detect changes to the file - intentional or unintentional
+;      from bad copies to sector edits or even bitrot. A variant of this progra
+;      was used at Cecure Electonics as an aid to identify poorly performing
+;      disk and hard drive controllers.
+;
+; CRC162s   2013 April 5 (RELEASED OCT 19, 2013)
+;      Table-driven CRACKIT/CRACK128:
+;      1. Copy MDOS CRC calc routine into 9995 internal RAM @>F020-end
+;      2. Generate 512 byte CRC table in execution page
+;      3. Use table to compute CRC
+;      4. The table algorithm was created after reviewing an online C version of
+;         table-driven CRC. The original file was lost along with
+;         the link to the C code. Performance enhancements added later.
+;
+; Approximate execution speed:
+;      1. 8.5s    CRC calculated 'old faithful' way one byte at a time
+;      2. 4.5s    CRC calculated with table; local page execution
+;      3. 3.0s    CRC calculated with table; primary loop in 9995 scratchpad
+;
+;      (OS speed enhancements also reduced the overall file load time ~40%)
+;
+;4.3.2021   Updated to conform to v7.22 requirements and 17x8k pages
+;           Consider using LOAD versus BREAD to support older <17page OS
+;           (Modify page counts, page dec, and CRC word count >x042)
+;           Finalized for Geneve OS v7.30
+;
+;4.23.2023  Minor updates for Geneve OS v7.40 release package
+;           Source code added to Geneve OS Utility folder for release
+;           CRC embedder code is still restricted to OS developers
+;
+;         $ Eliminating the hard-coded sizes/page info (done 7.41)
+;         $ Consider moving CRC from DSR page to CYA table page
+;
+;3.10.2024  Split CRC routine apart into CRCMAINS
+;           Rewrote BL @TTYOUT. Copy to WORK not needed.
+; v7.41     Reduced WORK buffer from 450 to 80. Only needed for Parse
+;
+CYACRC# EQU  0           define crc buffers here, not in CRCMAINS
+
+WS      EQU  >F000        my workspace
+
+MAIN3  LWPI WS           OS loader handles this and interrupts but I still
+       LIMI 0            like to explicitly set this in case of future change.
+
+       BL   @TTYOUT      Give user a title
+       DATA TITLE1,0
+
+       CLR  R0           Begin setting up for extra memory
+       XOP  @MEM,0       get free pages
+       CI   R1,OSTOTPAGES     ;17, set by CRCMAINS
+       JL   BYBY         if fewer available, exit..
+
+       LI   R0,1         get pages (R1 holds number available for our use)
+       LI   R2,8         VIRTUAL page 8 (pagetable starts AFTER 64K)
+       CLR  R3           Any RAM is ok
+       XOP  @MEM,0       get the RAM
+       ABS  R0           error?
+       JEQ  MEMOK        no
+
+BYBY   BL   @TTYOUT      memory error - report it!
+       DATA NOMEM,0
+       B    @EXIT
+
+MEMOK  LI   R0,4         get the memory table
+       LI   R1,PGETBL    and put it into the page table
+       LI   R2,254       this is overdoing it for 2Meg system, but who cares
+       XOP  @MEM,0       do it!
+
+***********************
+* GET THE FILE FROM CLI
+*
+GETAFILE
+       LI   R0,>3200          50 bytes for WORK length
+       LI   R1,WORK-1         patch it
+       MOVB R0,*R1+           crunch command line and move it to WORK
+       MOV  @>0128,R2         get command line argument address
+       JEQ  NOGOT             if no arguments
+
+       CB   @2(R2),@-1(R1)    see if command line is too long
+       JHE  NOGOT             if too long
+       MOV  R1,R5             else save address of WORK to R5
+       DEC  R5                to length pointer
+       MOVB @2(R2),R6         argument length
+       SRL  R6,8              make it a word
+       INCT R6                add two
+
+NXTNOD MOV  R2,R3             save command address
+       INCT R3                add 2
+       MOV  R2,R4
+       AI   R4,8
+GETNOD MOVB *R3+,*R5+         start moving the data
+       DEC  R6                till count is done
+       JEQ  GOTCMD
+
+       C    R3,R4             r3 holds node count
+       JL   GETNOD            if done this node, go get some more
+       MOV  *R2,R2            get next node
+       JMP  NXTNOD
+*
+GOTCMD MOVB @WORK-1,R1   length of argument
+       JEQ  NOGOT        if no arg
+       SRL  R1,8         else make it a word
+       INC  R1           and add 1 for the loop conter
+
+       LI   R2,40        largest filename possible
+       LI   R4,WORK      address of command line text
+GETFIL CB   *R4+,@H32    look for a space in the command line (filename)
+       JLE  GOTFIL       if ASCII 0-32, we have the filename
+       DEC  R1           don't have it yet, count down
+       JEQ  NOGOT        we done with arguments?
+       DEC  R2           we done with the 40 possible bytes of filename?
+       JNE  GETFIL
+
+NOGOT  BL   @TTYOUT
+       DATA USAGE,0
+       B    @EXIT
+*
+GOTFIL
+SETUPTHEPARSE
+       CLR  R0           we have the filename, now put a null at end
+       DEC  R4           back to the previous byte
+       MOVB R0,*R4       then write a null
+       LI   R0,8         parse the filename
+       LI   R1,WORK      get logical filename from here
+       LI   R2,LEN+1     and put hardware name in the pab
+       CLR  R3           what the hell is an alias prefix?
+       XOP  @UTIL,0      go do the parse
+*
+* ALL DONE PARSING, GETTING NAME, ETC.  NOW TO THE GOOD STUFF!
+*
+       BL   @TTYOUT
+       DATA OPENING,0
+
+       MOVB @LEN+1,@DMD+3
+
+       BL   @TTYOUT
+DMD    DATA FNAME,0
+
+       BL   @TTYOUT
+       DATA CRLF2,0
+
+       LI   R0,FILE
+       XOP  @IO,0
+       MOVB @FILE+2,R1        check for an error
+       JEQ  GOODFILE2         wrong file, incorrect size, etc
+
+       BL   @TTYOUT           show the error
+       DATA IOERR,0
+       JMP  EXIT
+*
+
+GOODFILE2
+       BL   @TTYOUT           'verifying'
+       DATA SHORT,0
+
+       BLWP @SHOWCRC     perform all calcs/comparisons. Output CRCGOOD
+
+; check crc values
+
+       BL   @PRTHEX
+       DATA USERCRC,2    print 2-byte crc
+
+
+;;     BL   @PRTHEX,     show both long CRCs for debugging
+;;     DATA MDOSCRC,34
+;;     BL   @TTYOUT
+;;     DATA CRLF2,0
+;;     BL   @PRTHEX
+;;     DATA CRCLIST,34
+
+
+       ABS  @CRCGOOD     was it good?
+       JNE NOGOOD
+
+HAHA   BL   @TTYOUT
+       DATA GOODCRC,0    File CRC matches computed.
+       JMP  EXITPL
+
+NOGOOD BL   @TTYOUT
+       DATA BADCRC,0
+
+*------------------------------
+EXITPL
+
+EXIT   BL   @TTYOUT           normal exit
+       DATA CRLF2,2           with a CRLF
+
+       LI   R0,>06            RELEASE MDOS MEMORY
+       LI   R1,1
+       XOP  @MEM,0
+       BLWP @0                Thank MDOS for working so well, then exit
+
+*-------------------------------------------------------------------------------
+* This may be a bit different, but I got it to work.  Prints the HEX
+* representation starting with the byte pointed to by R3.  R7 contains the
+* number of bytes to print (starting at R3).
+*
+PRTHEX MOV  *R11+,R3          get the starting location
+       MOV  *R11+,R7          get the number of bytes to print
+       LI   R0,>27            TTYOUT
+       LI   R1,WS+12          use R6 as the location to print from
+       LI   R2,1              one char to print
+
+PRT2   MOVB *R3+,R5           get the next byte
+       SRL  R5,8              make it a word value
+       CLR  R4                clear R4 for the divide
+       DIV  @SIXTEEN,R4       divide this by sixteen
+       MOVB @HEXDEC(R4),R6    get the ASCII character (pointer to by R4)
+       XOP  @VIDEO,0          print it
+       MOVB @HEXDEC(R5),R6
+       XOP  @VIDEO,0
+       MOV  R7,R6             move R7 (byte value)
+       ANDI R6,>0001          mask all but bit 1
+       JEQ  NOSPACE           if zero, jump (must have been an even byte)
+       MOVB @H32,R6           ah-ha.. odd!  let's print a space to separate the
+       XOP  @VIDEO,0          words of hex.
+NOSPACE
+       DEC  R7                any more to do?
+       JNE  PRT2              yup
+       RT                     no, return
+
+*********************
+; MDOS TTYOUT
+; Destroys R0,R1,R2
+TTYOUT MOV  *R11+,R1     ;3.16.2024, simplified
+       MOV  *R11+,R2     ;either len or 0 for null term
+       LI   R0,>0027
+       XOP  @VIDEO,0
+       RT
+
+*
+* end of code, data follows
+*
+NOMEM  TEXT 'Insufficient Memory!  144K Required'
+       BYTE >0D,>0A,0
+       EVEN
+OPENING
+       BYTE 13,10
+       TEXT 'Reading '
+       BYTE 0
+
+AUTHOR TEXT 'Copyright (c)2013,2024 T.Tesch'
+
+TITLE1 BYTE 13,10
+       TEXT 'Geneve OS (136k) File Verification v7.41,   [17 Mar 2024tt]'
+       BYTE 13,10,0
+
+GOODCRC BYTE 13,10,10
+        TEXT 'File integrity verified; no errors detected.'
+        BYTE 13,10,0
+
+BADCRC BYTE 13,10,10
+       TEXT 'WARNING: Verification failed! The OS file may be compromised.'
+       BYTE 13,10,0
+
+USAGE  BYTE 13,10,9
+       TEXT 'Usage:  CRCOS7  <OS file>    (remember "/" if named SYSTEM/SYS)
+       BYTE 13,10,0
+
+SHORT  BYTE 13,10
+       TEXT 'Checking CRC... '
+       BYTE 0
+
+IOERR  BYTE 13,10
+       TEXT 'FILE ERROR: Unable to open/read file or wrong OS version.'
+       BYTE 13,10,0
+
+CRLF2  BYTE 13,10,0           *cr/llf combo for ttyout
+H32    BYTE >20
+HFF    BYTE >FF
+VIDEO  DATA 6            video xop
+MEM    DATA 7            memory manager xop
+IO     DATA 8            i/o xop
+UTIL   DATA 9            utility xop
+HEXA   DATA 10
+SIXTEEN     DATA 16
+
+HEXDEC TEXT '0123456789ABCDEF'
+*
+       COPY "CRCMAINS"
+
+* equates vs BSS keeps file size down. Don't cross 8k (7k 1st segment) bndry!
+
+FILE   DATA >0A00,>0001,0,>0000,0,0,544      ;must use BREAD for TIPI
+LEN    DATA >0028      status byte / length byte
+FNAME  EQU  $          our parsed filename ends up here
+
+WORK   EQU  FNAME+50   command line parse buffer (80)
+PGETBL EQU  WORK+80    mapper. 256+8 = 264 bytes
+
+;see CRCMAINS
+CRCTABLE512  EQU  PGETBL+264           520 bytes
+SAVE9995     EQU  CRCTABLE512+520      256 bytes
+NEXTBUF      EQU  SAVE9995+256         placeholder
+*----------
+
+       END
+

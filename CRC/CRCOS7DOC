@@ -1,0 +1,50 @@
+File:       CRCOS7
+Program:    CRC integrity verification for Geneve OS/MDOS 7.40+
+Version:    7.41, compiled 17 Mar 2024
+Copyright:  (c)1994-2024 by T.Tesch
+Contact:    InsaneMultitasker or 9640News, at AtariAge.com
+=====================================================================
+
+CRCOS is used to verify the integrity of the Operating System file.
+
+
+USAGE:
+=======
+CRCOS7 is run from the Geneve OS command line or batch file:
+
+       Usage:  CRCOS7  <system file>
+
+     Example:  CRCOS7 H:\SYSTEM"/"SYS   quotes only needed for backslash
+               CRCOS7 G:\SYSTEM-SYS
+
+The program will load the entire OS into memory then calculate the CRC value
+for each 8k segment. The calculated values will be compared to the embedded
+CRCs.  Changes to the OS - intentional or otherwise - will result in a
+mismatch.  CRCOS will either report that the OS is verified or that it has
+been modified.
+
+A 2-byte CRC reference value is provided to the user. This value can be used
+to compare to the official release value. It can also be used as reference
+should the user sector-edit their own copy and wish to know if it has
+changed since that alteration.
+
+The CRC injection program is currently restricted to OS Developers
+
+
+ENHANCEMENT LOG:
+---------------
+V7.41  17 April 2024 Separated CRC routine for use in other utilities. Cleanup.
+
+V7.40  23 April 2023
+       Minor cleanup. Moved source and program to TOOLS folder for distribution
+
+V7.30  04 April 2021
+       - Final cleanup and release
+
+19 October 2013
+       - 128K version revised to use CRC-16 table-driven routine
+
+1994-2013
+       - Initial Release and variants: CRaCk-It! and CRACK128
+
+** End of file 17-Mar-2024, TT
