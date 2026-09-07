@@ -1,0 +1,37 @@
+* File: !MAKEFILE   For GenCFG Utility
+*
+* Define location of GenAsm, GenLink, GenWipe via macro e.g. $(GA)
+*   Remove the explicit BIN folder to allow OS to search path or specify your
+*   own location such as pfmdisk or ramdisk. Always use included $MAKE file
+*   as it corrects a few bugs and supports TIPI
+*
+* 3.24.2024 Created build make file
+* 09.06.2026 Changed LINK to LINKW (integrated WIPE)
+*
+
+GA=BIN\ASM
+GL=BIN\LINKW
+GW=BIN\WIPE
+
+*
+* ALERT -->ALWAYS validate SOURCE FILES & MAKEFILE before release<--
+*
+* General Usage:
+* -------------
+* MAKE CFG               Make GenCFG
+*
+* Special Flag examples:
+*   MAKE CFG,F           FORCE build of all object/program files
+*   MAKE CFG,V           VIEW the list of actions for a make attempt
+*
+***************************************************************************
+
+CFG: GENCFGO
+GENCFGO: BUILDS GENCFGS ..\PFM\PRODIDS AUFS HRS STUBS SPEECHS BEEPS
+
+       $(GA) BUILDS,BUILDO,,RCO
+*      $(GW)
+       $(GL) CFGL
+*
+
+* EOF
