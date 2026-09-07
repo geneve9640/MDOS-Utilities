@@ -25,5 +25,7 @@ In the 90s, the problem was most noticeable with MENU and its variants for the H
 Affected files will show up as unknown file types in these programs.  The Horizon ROS was updated
 to resolve this issue at the DSR level however, old disks/files may benefit from this fix. 
 
-
+## CFG
+GenCFG formatter/utility for the Horizon Ramdisk.   Also see
+https://github.com/horizonramdisk/Horizon-Ramdisk-ti994a/wiki
 
