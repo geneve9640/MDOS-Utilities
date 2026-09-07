@@ -1,0 +1,479 @@
+********************************************************************************
+* File:  PFMCOREUPS      End user program to update PFM Core  (Nov 1, 2001)
+* Uses:  prodids, outs
+*
+* 3.27.2021
+*      - Updated to conform to PRODIDS
+*      - CRC is validated prior to committing to write
+*
+* 4.3.2021
+*      - Added routine to inject approx 1-9 second delay, user driven
+*      - Did not update CRC; don't want user to dump core w/updated value
+*   >> - Code is placed into the old product ID segment of NOPS
+*
+* 4.17.2021
+*      - Warning, Routine to turn off cards was added to core at offset >0550
+*   >>   thus the delay injection code must NOT go beyond >054F
+*
+*-------------------------------------------------------------------------------
+* CRC Location within BIOS page >F8  [PFM bank 0]
+*
+* >0000->1E00 Segment we are CRC'ing
+*   PFM_CRCLOC  EQU  >1F80   offset into 8K page
+*   PFM_CRCLEN  EQU  >20     crc length (first 15 MDOS pages + core page)
+*   PFM_CORECRC EQU  >1F9E   core CRC location
+*
+* >1FB0 - start of hack routine to move OS pages 16,17 into DRAM
+*
+
+WS     EQU  >F000        my workspace
+
+*
+MAIN3  LWPI WS          LET'S LOAD OUR WORKSPACE
+       LIMI 0            turn off those interrupts!
+       BL   @TTYOUT
+       DATA TITLE1,0     show title
+
+       BL   @PRODID      check product ID/PFM presence
+       MOV  R0,R0
+       JNE  PFMFOUND
+
+       BL   @TTYOUT      error, abort
+       DATA PFMERR,0
+       B    @EXIT
+
+PFMFOUND
+       BL   @TTYOUT      display product id information
+       DATA PFMDEV,0
+       BL   @PRTHEX
+       DATA PRODID#,2
+
+       MOV  @PFM_TEXT,@TTXX
+       BL   @TTYOUT
+TTXX   DATA 0,0
+
+; Potentially inhibit updating wrong chip
+;    Expand this later, if we deem necessary
+;
+;      C    @PRODID#,@PFM040ID  PFM512 USING 29C040?
+;      JEQ  DOLOAD1           YES
+;
+;      BL   @TTYOUT
+;      DATA NOTCORRECTCHIP,0
+;      B    @EXIT
+
+
+******************************
+DOLOAD1
+       CLR  R0           Begin setting up for extra memory
+       XOP  @MEM,0       get free pages
+       CI   R1,2         want 15 pages for load
+       JL   BYBY         if fewer available, exit..
+
+       LI   R0,1         get pages (R1 holds number available for our use)
+       LI   R2,8         VIRTUAL page 8 (pagetable starts AFTER 64K)
+       CLR  R3           Any RAM is ok
+       XOP  @MEM,0       get the RAM
+       ABS  R0           error?
+       JEQ  MEMOK        no
+
+BYBY   BL   @TTYOUT      memory error - report it!
+       DATA NOMEM,0
+       B    @EXIT
+
+MEMOK  LI   R0,4         get the memory table
+       LI   R1,PGETBL    and put it into the page table
+       LI   R2,254       this is overdoing it for 2Meg system, but who cares
+       XOP  @MEM,0       do it!
+***********************
+* GET THE FILE FROM CLI
+*
+* parse routine from who knows where... at least it works
+*
+       LI   R0,>3200          50 bytes for WORK length
+       LI   R1,WORK-1         patch it
+       MOVB R0,*R1+           crunch command line and move it to WORK
+       MOV  @>0128,R2         get command line argument address
+       JEQ  NOGOT             if no arguments
+       CB   @2(R2),@-1(R1)    see if command line is too long
+       JHE  NOGOT             if too long
+       MOV  R1,R5             else save address of WORK to R5
+       DEC  R5                to length pointer
+       MOVB @2(R2),R6         argument length
+       SRL  R6,8              make it a word
+       INCT R6                add two
+
+NXTNOD MOV  R2,R3             save command address
+       INCT R3                add 2
+       MOV  R2,R4
+       AI   R4,8
+GETNOD MOVB *R3+,*R5+         start moving the data
+       DEC  R6                till count is done
+       JEQ  GOTCMD
+
+       C    R3,R4             r3 holds node count
+       JL   GETNOD            if done this node, go get some more
+       MOV  *R2,R2            get next node
+       JMP  NXTNOD
+*
+GOTCMD MOVB @WORK-1,R1   length of argument
+       JEQ  NOGOT        if no arg
+       SRL  R1,8         else make it a word
+       INC  R1           and add 1 for the loop conter
+
+       LI   R2,40        largest filename possible
+       LI   R4,WORK      address of command line text
+GETFIL CB   *R4+,@H32    look for a space in the command line (filename)
+       JLE  GOTFIL       if ASCII 0-32, we have the filename
+       DEC  R1           don't have it yet, count down
+       JEQ  NOGOT        we done with arguments?
+       DEC  R2           we done with the 40 possible bytes of filename?
+       JNE  GETFIL
+
+NOGOT  BL   @TTYOUT
+       DATA USAGE,0
+       B    @EXIT
+*
+GOTFIL
+SETUPTHEPARSE
+       CLR  R0           we have the filename, now put a null at end
+       DEC  R4           back to the previous byte
+       MOVB R0,*R4       then write a null
+       LI   R0,8         parse the filename
+       LI   R1,WORK      get logical filename from here
+       LI   R2,LEN+1     and put hardware name in the pab
+       CLR  R3           what the hell is an alias prefix?
+       XOP  @UTIL,0      go do the parse
+*
+*ALL DONE PARSING, GETTING NAME, ETC.  NOW TO THE GOOD STUFF!
+*----------------------------------------------------------------------------
+*
+       BL   @TTYOUT
+       DATA OPENING,0    ;reading file
+
+       LI   R0,FILE
+       XOP  @IO,0
+       MOVB @FILE+2,R1        check for an error
+       JEQ  GOODFILE2         wrong file, incorrect size, etc
+       BL   @TTYOUT           show the error
+       DATA IOERR,0           ERROR!!!!!
+       JMP  EXIT
+*
+* Got a good file, let's verify its integrity
+*
+GOODFILE2
+
+; single page; calculate core crc value for comparison
+       LI   R3,1         number of pages
+       LI   R4,PGETBL+8  Using memory starting at >10000  (first page above 64K)
+       LI   R5,CRCLIST   location to store CRC bytes
+       LI   R9,MDOSCRC   location to put the MDOS CRC (from memory)
+
+NEXTPAGE
+       MOVB *R4+,@>F111  get a page of data
+       LI   R0,>2000
+       CLR  R8           clear the CRC
+NEXTBYTE
+NOSKIP BL   @CRCUPDATE        update the CRC
+SKIPIT CI   R0,>3E00          end of this page?
+       JL   NEXTBYTE          no, get another
+
+       MOV  R8,*R5+           yes,add CRC to the list
+       DEC  R3                any pages left?
+       JNE  NEXTPAGE          yes, start again
+
+
+       C    @CRCLIST,@>3F9E   Calculated CRC and embedded equal?
+       JEQ  ASKUSER           YES, lets program!
+       BL   @TTYOUT
+       DATA CRCERROR1,0
+       JMP  EXIT
+
+;CRC Matches, confirm w/user before committing
+
+ASKUSER
+       BL   @TTYOUT
+       DATA PROGRAMYN,0
+
+       CLR  R0
+KEYL2  XOP  @KEY,0       confirm with user!
+       SRL  R1,8
+       ANDI R1,>005F
+       CI   R1,'Y'
+;;     JEQ  PROGIT
+       JEQ  ASKINJECT    ask for injected delay
+       CI   R1,'N'
+       JEQ  EXIT
+       JMP  KEYL2
+
+DELAY  LI   R1,1*5       1 SECOND DEFAULT
+DEL0   CLR  R2
+DEL1   DEC  R2
+       JNE  DEL1
+       DEC  R1
+       JNE  DEL0
+DELAYEND CLR R2          Dummy instruction
+
+ASKINJECT
+       BL   @TTYOUT
+       DATA INJECTYN,0
+
+       CLR  R0
+KEYD2  XOP  @KEY,0       confirm with user!
+       SRL  R1,8
+;;     ANDI R1,>005F
+       CI   R1,>1B       Escape? Yes, skip injection
+       JEQ  NOINJ        Tell user then program
+
+       CI   R1,'1'
+       JL   KEYD2
+       CI   R1,'9'
+       JH   KEYD2
+;
+; Note: we do NOT update the corecrc to inhibit someone later dumping and
+;      passing along as valid
+
+       SWPB R1
+       MOVB R1,@INJECT#  ;save for printing
+       SWPB R1
+
+       AI   R1,->30      ascii to int
+       LI   R0,5         factor of 5
+       MPY  R0,R1        r0*r1= r1r2
+       MOV  R2,@DELAY+2  set delay in code segment
+
+       LI   R1,DELAY
+       LI   R2,>2520     >2000 + >0520 OFFSET (core mapped @ >2000-3fff)
+INJ1   MOV  *R1+,*R2+    inject the code to unused product ID area
+       CI   R1,DELAYEND
+       JL   INJ1
+
+       BL   @TTYOUT
+       DATA INJECT#,0
+       JMP  PROGIT
+
+NOINJ  BL   @TTYOUT
+       DATA INJECTESC,0
+       JMP  PROGIT
+
+
+; Proceed with updating the core (and cross fingers!)
+PROGIT BL   @TTYOUT
+       DATA PROGRAMMING,0
+
+;;     BL   @PRTHEX      display, confirm modified delay code in place
+;;     DATA >2500,100
+
+       BL   @PFM              program flashdisk
+
+       BL   @TTYOUT
+       DATA CORCOM,0
+
+*------------------------------
+EXIT   BL   @TTYOUT           normal exit
+       DATA CRLF2,2           with a CRLF
+       LI   R0,>06            RELEASE MDOS MEMORY
+       LI   R1,1
+       XOP  @MEM,0
+       BLWP @0                Thank MDOS for working so well, then exit
+
+
+* PROGRAMMING CODE
+*----------START
+*
+* >14  >1D|              Page
+*---------+-----------------------------------------------------------------
+*  0    0 | 0   1  2  3  4  5  6  7  BIOS  9 10 11 12 13 14 15    System
+*  1    0 | 16 17                                           31    Flash #2
+*  0    1 | 32 33                                           47    Flash #1
+*  1    1 | 48 49                                        OS OS    Flash #3
+*         |
+
+PFM_CRCLOC  EQU  >1F80   offset into 8K page
+PFM_CRCLEN  EQU  >20
+PFM_CORECRC EQU  >1F9E
+
+PFM    LI   R1,>F1F2     set pages for PFM
+       MOVB R1,@>F111
+       SWPB R1
+       MOVB R1,@>F112
+
+GP     CLR  R9           COUNTER
+       LI   R4,PGETBL+8  STARTING PAGE @>10000
+       MOVB *R4,@>F114   source
+       LI   R4,>F800
+       MOVB R4,@>F115    DEST (FLASH)
+
+HI     LI   R1,>8000     F114   (OUTER LOOP)
+       LI   R2,>A000     F115
+
+       CLR  R12
+       SBZ  >14          System page
+       SBZ  >1D
+;
+; This preserves CRCs; moot point for the OS since we no longer validate
+;
+       LI   R1,>9F80     preserve MDOS CRC already present in flash
+       LI   R2,>BF80
+SAVCRC MOV  *R2+,*R1+
+       CI   R2,>BFA0
+       JNE  SAVCRC
+
+       MOV  @CRCLIST,@>9F9E   transfer CORE crc to its correct location
+
+       LI   R1,>8000     reset memory addresses
+       LI   R2,>A000     and start programming
+
+HH     SBO  >15          INNER LOOP
+       CLR  R8
+       MOVB @HC,@>5555 aa SET IP WRITE
+       MOVB @HD,@>2AAA 55
+       MOVB @HE,@>5555 a0
+       NOP                safegaurd
+HF     MOVB *R1+,*R2+
+       INC  R8
+       C    R8,@PFM_SECSIZE   3.27.2021, prodid value
+
+;;     CI   R8,>0200    512 bytes written, yet?
+       JNE  HF
+
+* VERIFY programmmed
+       CLR  R8           reset
+       SBZ  >15          toggle
+       DEC  R1
+       DEC  R2
+HG     CB   *R1,*R2      programmed?
+       JNE  HG           not yet, keep waiting
+       INC  R2           got it! inc
+       INC  R1           both counters
+       CI   R2,>C000     end of this bank?
+       JNE  HH           loop again
+
+       RT
+
+** done reprogramming
+
+
+       COPY "PRODIDS"
+       COPY "OUTS"
+
+******************************************************
+*      Old faithful...
+*
+CRCUPDATE
+       MOVB *R0+,R1
+       ANDI R1,>FF00     CLEAR LSBYTE
+       XOR  R1,R8        XOR NEW DATA WITH OLD CRC
+       MOV  R8,R1        MOVE TO SCRATCH REGISTER
+       SRL  R1,4
+       XOR  R8,R1        XOR CRC WITH SCRATCH
+       ANDI R1,>FF00     CLEAR LSB
+       SRL  R1,4
+       XOR  R1,R8        XOR SCRATCH WITH CRC
+       SRC  R1,7
+       XOR  R1,R8        XOR SCRATCH WITH CRC
+       SWPB R8           REVERSE BYTES OF CRC
+       RT
+* end of code, data follows
+*
+NOMEM  TEXT 'Error: Insufficient Memory'
+       BYTE >0D,>0A,0
+       EVEN
+
+OPENING
+       BYTE 13,10,10
+       TEXT 'Loading...'
+       BYTE 0
+
+TITLE1
+       BYTE 13,10
+       TEXT 'PFMCOREUP, Core Updater v2.31     [03 April 2021 TT]
+       BYTE 13,10,0
+
+CRCERROR1
+     BYTE 13,10,10
+     TEXT 'WARNING: PFM core file is corrupt or modified. Operation Halted!'
+     BYTE 13,10,0
+
+USAGE  BYTE 13,10,10,9
+       TEXT 'Usage:  PFMCOREUP <pfm core file>
+       BYTE 13,10,0
+
+NOTCORRECTCHIP
+       BYTE 13,10,10
+       TEXT 'ERROR: Incorrect PFM chip.  Unable to reprogram.'
+       BYTE 13,10,0
+
+PROGRAMYN
+       TEXT ' please confirm - program PFM? (Y/N): '
+       BYTE 0
+
+INJECTYN
+       BYTE 'Y'
+       BYTE 13,10,10
+       TEXT 'Add startup delay (1-9 seconds)?   ESCape for no delay: '
+       BYTE 0
+INJECTESC
+       TEXT 'No delay'
+       BYTE 0
+
+INJECT# TEXT 'x second(s)'
+       BYTE 0
+
+PROGRAMMING
+;      BYTE 'Y'
+       BYTE 13,10,10
+       TEXT 'Programming pfm core...'
+       BYTE 0
+
+CORCOM TEXT 'complete!'
+       BYTE 13,10,0
+
+IOERR  TEXT 'File Error, operation aborted!'
+       BYTE 13,10,0
+
+CRLF2  BYTE 13,10,0           *cr/llf combo for ttyout
+H32    BYTE >20
+HFF    BYTE >FF
+KEY    DATA 5
+VIDEO  DATA 6            video xop
+MEM    DATA 7            memory manager xop
+IO     DATA 8            i/o xop
+UTIL   DATA 9            utility xop
+HEXA   DATA 10
+
+PAGELIST    DATA >F0F1,>F2F3,>F4F5,>F6F7
+            DATA >F9FA,>FBFC,>FDFE,>FFFF
+            DATA >F800
+            DATA 0
+HC     BYTE >AA
+HD     BYTE >55
+HE     BYTE >A0
+       BYTE 0
+       EVEN
+;;PFMHOLD BSS 512
+
+SIXTEEN     DATA 16
+PGETBL      DATA 0
+            DATA 0
+            DATA 0
+            DATA 0
+            BSS  254
+CRCOUT      BYTE 13,10
+CRCLIST     DATA 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+USERCRC     DATA 0
+MDOSCRC     DATA 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+
+*
+FILE  DATA >0A00,>0001,0,>0000,0,0,32
+
+LEN    DATA >0028   * --> status byte / length byte
+FNAME  EQU  $
+MAP    EQU  FNAME+50
+DOCRPT EQU MAP+10
+BUF    EQU  DOCRPT+200
+WORK   EQU  BUF+300
+WORK11 BSS  400
+*---------------------------------------------------------
+       END
+

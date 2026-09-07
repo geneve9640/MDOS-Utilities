@@ -1,0 +1,172 @@
+File:       PFMDOC
+Program:    Utilities for PFM+/PFM512 upgrade and support
+            For use with Geneve OS / MDOS 7.40 and above
+Copyright:  (c)1998,2024 by T.Tesch
+Release:    23 March 2024
+Contact:    InsaneMultitasker or 9640News, at AtariAge.com
+=====================================================================
+
+The PFM+ and PFM512 are replacements for the Geneve 9640 Boot EPROM.
+The upgrade consists of one or two EEPROMS that allow the user to store both
+the Operating System and a number of files in the flash memory. If installed
+you will see a blue, 80 column screen in place of the Swan image.
+
+    PFM+   - Initial release.  2 x 128K Atmel 29c010 EEPROMS
+    PFM512 - Second release.  1 x 512K Atmel 29c040 EEPROM
+                              Atmel 29c040a and Winbond 040 compatible
+
+The files in this release are provided for you, the user, to upgrade the
+PFM operating CORE (boot bios), install the OS, and install a flashdisk.
+
+                ************************************
+                            W A R N I N G
+                ************************************
+                          PREPARATORY STEPS
+                ************************************
+
+1. NEVER program the OS or Flashdisk via the PFM boot menu. These options will
+       corrupt the system and the flashdisk.  Use the PFM utilities or CYA.
+
+2. The program has been tested in multiple systems. If you have questions or
+   concerns, please ask before you start the process.
+
+3. Create a copy of the files on your existing Flashdisk. The OS and Flashdisk
+   utilities will overwrite the current contents.
+
+4. Create at least one emergency copy of the Geneve OS on a floppy. Verify
+   the file's integrity before committing to an update.
+
+5. Copy your AUTOEXEC to the Geneve OS floppy. You may need to execute this
+       file manually from the command line using the ampersand "&"
+
+6. If possible, test load the Geneve OS via the PFM boot menu. The boot menu
+   can be accessed by holding the space bar at powerup. DO NOT program the
+   OS via the menu!
+
+7. Write down your device assignments, remaps, paths, and SCSMAP configuration.
+   When you load the new OS, the settings will default to original state. The
+   most recent CYA can be used to set the configuration directly.
+
+6. Reminder: the AUTOEXEC will default load from DSK1. unless/until you
+   modify the OS via CYA.
+
+       File              Description
+       ============      ================================================
+       PFMCOREUP         BIOS Core updater/programmer. Use with CORE file
+       COREV802          BIOS Core Revision 8.02
+       ------------      -------------------------------
+       PFMSYS            System/Sys (OS) loader for PFM device
+       PFMPLUSF          PFM+ flashdisk loader
+       PFM512F           PFM512 flashdisk loader
+       PFMPROD           PFM device identifier; standalone
+
+*New   PFMDUMPOS         Dump the installed OS (136k) from PFM to file
+*New   PFMCRC            Check the integrity of the installed OS
+       RAM111            Batch file to create ramdisk for PFM+ flash setup
+
+---------------------------------------------------------------------------
+The core/boot BIOS must be upgraded to support MDOS 7.40+
+
+Be sure all necessary preparation is complete before starting this process.
+
+------------------------
+1. UPGRADE THE PFM CORE
+------------------------
+
+From the command line: PFMCOREUP <corefile>
+
+             Examples: PFMCOREUP COREV802    (current path)
+                       PFMCOREUP H:COREV802  (with path)
+
+If the PFM device is detected, the program will load the core file and validate
+its integrity. If successful, you will be asked to confirm the program step.
+If you select "Y" to program, the new core will be loaded into your PFM.
+
+
+------------------------
+2. INSTALL THE OS
+------------------------
+If you are ready to install MDOS, proceed with this step. Although not
+recommended, you may continue to use the old MDOS loaded in your device.
+
+From the command line:   PFMSYS  <systemfile>
+
+             Examples:   PFMSYS  SYSTEM"/"SYS    [quotes required for slash]
+                         PFMSYS  H:HDOS
+
+PFMSYS will load the OS into memory. The program will check the integrity of
+the OS file. If the program reports an error or changes, consider obtaining
+another copy of the OS.  (See also CRCOS7)
+
+You will be prompted to program the PFM with the OS. If you select "Y",
+the OS will be loaded within a few second.
+
+You may run PFMCRC to validate the programming.
+
+When finished, you may restart your Geneve.  Autoexec will load from DSK1
+or default for the system file.
+
+---------------------------------
+3. Set Up The PFM FLASHDISK
+---------------------------------
+The flashdisk mimics a read-only ramdisk. Its capacity is based on the chipset
+
+Capacity:   PFM+      444 sectors
+            PFM512   1440 sectors
+
+Use REMAP xT where x=DSK1-9, to access the flash device
+
+The flashdisk is loaded by means of a sector-based device. Future
+enhancements may allow for disk image files.
+
+
+CHOOSE THE APPROPRIATE FOR YOUR SYSTEM:
+
+PFM+ Flashdisk (Atmel 29c010 x 2)
+---------------------------------
+1. Execute the batch file with an ampersand "&" to create a 444 sector ramdisk
+       Example:  "&RAM111"  will create the internal ramdisk
+2. Remap a disk device  to the internal ramdisk e.g. REMAP 5E to remap DSK5.
+3. Label the ramdisk volume, if desired.
+4. Copy your files to the internal ramdisk
+4. Run PFMPLUSF to copy the files from ramdisk to PFM+ flashdisk
+            Example:     PFMPLUSF DSK5.
+                         PFMPLUSF E:  (if E is assigned to DSK5.)
+5. Confirm programming. When complete, the flashdisk is ready.
+6. Remap a disk device e.g., REMAP 6T to assign DSK6 to the flashdisk
+
+PFM512 Flashdisk
+-----------------
+1. Prepare/format a disk or initialize an internal ramdisk
+     a) DS/DD disk, capacity 1440 sectors OR
+     b) Horizon Ramdisk using GENCFG, select option for "1440" Disk.
+            (Warning:  this will erase all data on the ramdisk)
+     c) Internal Ramdisk size 360k, if you have expanded memory
+
+2. Label the disk if desired
+3. Copy file to the formatted device
+4. Run PFM512F to copy the files to the PFM512 flashdisk
+            Example:     PFM512F DSK5.  (copy from DSK5)
+                         PFM512F A:     (copy from floppy)
+
+5. Confirm programming. When complete, the flashdisk is ready.
+6. Remap a disk device e.g., REMAP 6T to assign DSK6 to the flashdisk
+
+----------------
+ENHANCEMENT LOG:
+----------------
+03.23.2024  Updated instructions for clarity
+            Added PFMCRC and PFMDUMPOS utilities
+            Renamed PFM128F to PFMPLUSF
+            CYA 7.50 supports direct programming of the Operating System
+
+01.16.2022  (Release 2)
+            -PFM Core updated to v8.02
+              At startup, all peripheral cards are turned off (SBZ 0) prior
+              to execituing the DSR powerup. This is necessary for cards that
+              do not support RESET and/or instances where a card is left on
+              accidentally. A similar update is pending for GPL and EXEC.
+
+04.03.21    Initial Release (1)
+
+** End of file 03-Mar-2024, TT

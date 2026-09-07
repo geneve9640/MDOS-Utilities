@@ -1,0 +1,8 @@
+ramdisk 111
+ECHO 111k Ramdisk Created
+ECHO Remap and assign as needed
+ECHO
+ECHO Label the ramdisk (it will be copied to the Flashdisk)
+ECHO
+ECHO Copy files to the internal ramdisk then run PFMPLUSF to program flashdisk
+ECHO

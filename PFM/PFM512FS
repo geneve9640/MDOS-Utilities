@@ -1,0 +1,398 @@
+********************************************************************************
+* File: PFM512FS - Write PFM FlashDisk to PFM512 (pfm+ not supported)
+* Uses: prodids,outs
+*
+*
+*10.12.2014 PFM512 released. Atmel 29C040 support
+*
+*09.10.2018 Added Product ID code
+*           Updated title, display PFM device, etc.
+*           Since this is 'disk' based, it won't work with TIPI.
+*           Added user confirmation following disk load
+*
+*  **  Should devise a way to confirm the PFM chip does not have a wire fault
+*  *** so that you don't incorrectly FLASh the BIOS partition.
+*  **
+*      VERIFY only a floppy device can be used!!!!! (images later)
+*
+*      1. First 256 bytes contain BB99 flag and index to consecutive pages
+*      2. Second and subsequent 256 bytes correspond to sector 0, 1, etc.
+*      3. Maximum sectors per type:
+*           PFM512 = 45 pages*8k/page=360k + 256 bytes = 46 pages
+*           PFM+   = 15 pages*8k/page=120k BUT 1 sector required for index.
+*                                          * fix with Jim's program
+*      4. Need generic write subroutine - too many flash write routines
+*      5. Should limit sector loads to 120K -- better for memory-challenged
+*
+;03.27.2021 Updated code for PRODID w/winbond, atmel
+;           Future Idea: Allow users to create a DSK image that is read into
+;                        memory and written to flash (ie, for TIPI users)
+;          -Check for PFM+ and exit
+;
+;03.23.2024 Removed code and comments that do not apply
+;           Fixed TTYOUT and WORK-1 allocation in EQUates
+;
+*-------------------------------------------------------------------------------
+WS     EQU  >F000        my workspace
+
+       MAC  DXOP         macro for genasm
+       MAC  !1
+!!0    XOP  !!1,!2
+       !-MEND
+       MEND              end of macro
+
+       DXOP CALL,0       define CALL as meaning XOP 0
+*
+MAIN3  LWPI WS          LET'S LOAD OUR WORKSPACE
+       LIMI 0            turn off those interrupts!
+       BL   @TTYOUT      Give user a title
+       DATA TITLE1,0
+
+       BL   @TTYOUT
+       DATA PFMDEV,0
+
+       BL   @PRODID
+       MOV  R0,R0
+       JNE  PFMFOUND
+
+       BL   @TTYOUT      no device,error and exit
+       DATA PFMERR,0
+       B    @EXIT
+
+* PFM chip identified. Tell user and set up for load
+PFMFOUND
+
+       BL   @PRTHEX      show device
+       DATA PRODID#,2
+
+       MOV  @PFM_TEXT,@PFMTT7
+       BL   @TTYOUT
+PFMTT7 DATA 0,0
+
+       BL   @TTYOUT
+       DATA CRLF2,0
+
+       LI   R0,>1FD5          ;let's be sure PFM+ users don't accidentally
+       C    R0,@PRODID#       ;run this!  Compare product ID
+       JNE  PFMSUP
+
+       BL   @TTYOUT           ;PFM+ - abort!
+       DATA PFMNOTSUPPORTED,0
+       B    @EXIT
+
+; We have a supported 512k chip; get memory and filename
+PFMSUP CLR  R0           Begin setting up for extra memory
+       XOP  @MEM,0       get free pages
+       CI   R1,46    (368k)   pages for load
+       JL   BYBY         if fewer available, exit..
+
+       LI   R0,1         get pages (R1 holds number available for our use)
+       LI   R2,8         VIRTUAL page 8 (pagetable starts AFTER 64K)
+       CLR  R3           Any RAM is ok
+       XOP  @MEM,0       get the RAM
+       ABS  R0           error?
+       JEQ  MEMOK        no
+
+BYBY   BL   @TTYOUT      memory error - report it!
+       DATA NOMEM,0
+       B    @EXIT
+
+MEMOK  LI   R0,4         get the memory table
+       LI   R1,PGETBL    and put it into the page table
+       LI   R2,254       this is overdoing it for 2Meg system, but who cares
+       XOP  @MEM,0       do it!
+
+       LI   R1,PGETBL+8
+       MOVB *R1,@>F114   map in >8000->9FFF
+;
+;I think we are burning 8k-256 bytes just for the header/sector device
+;
+       LI   R2,BB99HEADER     Populate header at virt page 1, 0-255.
+       LI   R3,>8000
+POPIT  MOVB *R2+,*R3+
+       CI   R3,>8100     256 bytes
+       JL   POPIT
+
+
+***********************
+* GET THE FILE FROM CLI
+*
+* parse routine from who knows where... at least it works
+*
+       LI   R0,>3200          50 bytes for WORK length
+       LI   R1,WORK-1         patch it
+       MOVB R0,*R1+           crunch command line and move it to WORK
+       MOV  @>0128,R2         get command line argument address
+       JEQ  NOGOT             if no arguments
+       CB   @2(R2),@-1(R1)    see if command line is too long
+       JHE  NOGOT             if too long
+       MOV  R1,R5             else save address of WORK to R5
+       DEC  R5                to length pointer
+       MOVB @2(R2),R6         argument length
+       SRL  R6,8              make it a word
+       INCT R6                add two
+
+NXTNOD MOV  R2,R3             save command address
+       INCT R3                add 2
+       MOV  R2,R4
+       AI   R4,8
+GETNOD MOVB *R3+,*R5+         start moving the data
+       DEC  R6                till count is done
+       JEQ  GOTCMD
+
+       C    R3,R4             r3 holds node count
+       JL   GETNOD            if done this node, go get some more
+       MOV  *R2,R2            get next node
+       JMP  NXTNOD
+*
+GOTCMD MOVB @WORK-1,R1   length of argument
+       JEQ  NOGOT        if no arg
+       SRL  R1,8         else make it a word
+       INC  R1           and add 1 for the loop conter
+
+       LI   R2,40        largest filename possible
+       LI   R4,WORK      address of command line text
+GETFIL CB   *R4+,@H32    look for a space in the command line (filename)
+       JLE  GOTFIL       if ASCII 0-32, we have the filename
+       DEC  R1           don't have it yet, count down
+       JEQ  NOGOT        we done with arguments?
+       DEC  R2           we done with the 40 possible bytes of filename?
+       JNE  GETFIL
+
+NOGOT  BL   @TTYOUT
+       DATA TITLE2,0
+       BL   @TTYOUT
+       DATA USAGE,0
+       B    @EXIT
+*
+GOTFIL
+SETUPTHEPARSE
+       CLR  R0           we have the filename, now put a null at end
+       DEC  R4           back to the previous byte
+       MOVB R0,*R4       then write a null
+       LI   R0,8         parse the filename
+       LI   R1,WORK      get logical filename from here
+       LI   R2,LEN+1     and put hardware name in the pab
+       CLR  R3           what the hell is an alias prefix?
+       CALL @UTIL        go do the parse
+*
+*ALL DONE PARSING, GETTING NAME, ETC.  NOW TO THE GOOD STUFF!
+*----------------------------------------------------------------------------
+*
+       BL   @TTYOUT
+       DATA OPENING,0
+
+       LI   R0,FILE
+       CALL @IO
+       MOVB @FILE+2,R1        check for an error
+       JEQ  GOODFILE2         wrong file, incorrect size, etc
+       BL   @TTYOUT           show the error
+       DATA IOERR,0
+       JMP  EXIT
+*
+*
+GOODFILE2
+
+ASKUSER
+       BL   @TTYOUT
+       DATA PROGRAMYN,0
+
+       CLR  R0
+ASK19  XOP  @KEY,0
+       ANDI R1,>5F00
+       CI   R1,'Y'*256
+       JEQ  PROGOK
+       CI   R1,'N'*256
+       JNE  ASK19
+       BL   @TTYOUT
+       DATA PROGRAMNO,0
+
+       B    @EXIT
+
+
+PROGOK BL   @TTYOUT
+       DATA PROGRAMMING,0
+
+       BL   @PFM         DO IT!!!
+
+       BL   @TTYOUT
+       DATA PROGRAMDONE,0
+
+EXIT   BL   @TTYOUT           normal exit
+       DATA CRLF2,2           with a CRLF
+       LI   R0,>06            RELEASE MDOS MEMORY
+       LI   R1,1
+       CALL @MEM
+       BLWP @0                Thank MDOS for working so well, then exit
+
+*===========================================================
+* PROGRAMMING CODE
+*===========================================================
+* Destroys:  R1,R2,R4,R8,R9,R11,R12
+*
+
+PFM    LI   R1,>F1F2
+       MOVB R1,@>F111
+       SWPB R1
+       MOVB R1,@>F112
+
+GP     CLR  R9           COUNTER
+       LI   R4,PGETBL+8  STARTING PAGE @>10000
+
+HI     LI   R1,>8000     F114   (OUTER LOOP)
+       LI   R2,>A000     F115
+GZ     MOVB @PAGELIST(R9),@>F115   DEST.
+
+* R9 = current page from table
+
+HB     MOVB *R4+,@>F114  map our data @>8000->9FFF each time around
+       CLR  R8
+       CLR  R12
+
+       SBZ  >14          toggle pages
+       SBO  >1D
+       CI   R9,15
+       JLE  HH
+       SBO  >14
+       SBZ  >1D
+       CI   R9,31
+       JLE  HH
+       SBO  >14
+       SBO  >1D
+       NOP
+
+HH     SBO  >15          INNER LOOP
+       CLR  R8
+       MOVB @HC,@>5555 aa SET IP WRITE   >D820,>0B3A,>5555  '. .:UU'       0A9A
+       MOVB @HD,@>2AAA 55               >D820,>0B3B,>2AAA  '. .;*.'       0AA0
+       MOVB @HE,@>5555 a0               >D820,>0B3C,>5555  '. .<UU'       0AA6
+       NOP
+HF     MOVB *R1+,*R2+
+       INC  R8
+
+       C    @PFM_SECSIZE,R8   9-11-2018, based on product ID!
+       JNE  HF
+
+* VERIFY programmmed
+       CLR  R8           reset
+       SBZ  >15          toggle
+       DEC  R1
+       DEC  R2
+HG     CB   *R1,*R2      programmed?
+       JNE  HG           not yet, keep waiting
+       INC  R2           got it! inc
+       INC  R1           both counters
+       CI   R2,>C000     end of this bank?
+       JNE  HH           loop again
+;
+; if we load in chunks, check for 120k,240k load page and call XOP
+;      with the starting sector for the chunk
+
+       INC  R9           next page
+       CI   R9,46        max 45 pages + 256 bytes for BB99 Header (EQUALS 46)
+       JNE  HI           yes
+*------END
+
+       RT
+
+       COPY "PRODIDS"    product ID code
+       COPY "OUTS"
+
+* end of code, data follows
+*
+NOMEM  BYTE 13,10
+       TEXT 'WARNING: Program requires 368k RAM. Disable TIMODE and internal'
+       TEXT ' RAMDisk'
+       BYTE >0D,>0A,0
+       EVEN
+OPENING
+       BYTE 13,10
+       TEXT 'Reading disk into memory...'
+       BYTE 13,10,0
+
+TITLE1
+       BYTE 13,10,10
+       TEXT 'PFM512F, Flashdisk Loader v1.5    [23 Mar 2024tt]'
+       BYTE 13,10,0
+TITLE2 TEXT ' '
+       BYTE 0
+
+USAGE  BYTE 13,10,10,9
+       TEXT 'Usage:  PFM512F A:   (where A: is a SECTOR based device)'
+       BYTE 13,10,0
+
+PROGRAMMING BYTE 13,10,10
+            TEXT 'Programming Flashdisk...'
+            BYTE 0
+
+IOERR  BYTE 13,10
+       TEXT 'WARNING: Device read error! Load aborted!'
+       BYTE 13,10,10,0
+
+PFMNOTSUPPORTED
+       BYTE 13,10
+       TEXT 'PFM+ is not supported - use PFM128F'
+       BYTE 13,10,0
+
+PROGRAMYN
+       BYTE 13,10
+       TEXT 'Disk loaded, program PFM Flashdisk (Y/N)? '
+       BYTE 0
+
+PROGRAMNO
+       BYTE 13,10,10
+       TEXT 'Program Halted'
+       BYTE 13,10,0
+
+PROGRAMDONE
+       TEXT 'Complete!'
+       BYTE 13,10,10
+       TEXT 'Remember to REMAP the drive and assign a device.'
+       BYTE 13,10,0
+
+CRLF2  BYTE 13,10,0           *cr/llf combo for ttyout
+H32    BYTE >20
+HFF    BYTE >FF
+KEY    DATA 5
+VIDEO  DATA 6            video xop
+MEM    DATA 7            memory manager xop
+IO     DATA 8            i/o xop
+UTIL   DATA 9            utility xop
+HEXA   DATA 10
+
+
+
+BB99HEADER  DATA >BB99        Header info for PFM page
+
+PAGELIST    DATA >F0F1,>F2F3,>F4F5,>F6F7     bank 2  (16 pages)
+            DATA >F8F9,>FAFB,>FCFD,>FEFF
+
+            DATA >F0F1,>F2F3,>F4F5,>F6F7     bank 1  (16 pages)
+            DATA >F8F9,>FAFB,>FCFD,>FEFF
+
+            DATA >F0F1,>F2F3,>F4F5,>F6F7     bank 3  (14 pages)
+            DATA >F8F9,>FAFB,>FCFD,>FEFF     ;FEFF is the OS!
+            DATA 0
+HC     BYTE >AA
+HD     BYTE >55
+HE     BYTE >A0
+       BYTE 0
+       EVEN
+
+SIXTEEN     DATA 16
+
+*
+*                    |--page offset x1000 is page 8 (1st virtual)
+*                    |  |--256 byte offset into page (keeps BB99 intact)
+*                    |  |
+FILE  DATA >0A00,>0001,256,>0000,0,0,1440
+
+LEN    DATA >0028   * --> status byte / length byte
+FNAME  EQU  $
+WORK   EQU  FNAME+60     ;WORK-1 is used in parse routine
+PGETBL EQU  WORK+80      ;256+8
+
+*---------------------------------------------------------
+       END
+
+

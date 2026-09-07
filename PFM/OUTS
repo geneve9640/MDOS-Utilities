@@ -1,0 +1,59 @@
+; OUTS  - TTYOUT and PRTHEX
+;           Should rework like EMIT in GPL
+;
+;03.23.2024 Remove WORK dependency from TTYOUT. Simplify.
+;
+*-------------------------------------------------------------------------------
+* This may be a bit different, but I got it to work.  Prints the HEX
+* representation starting with the byte pointed to by R3.  R7 contains the
+* number of bytes to print (starting at R3).
+*
+PRTHEX MOV  *R11+,R3          get the starting location
+       MOV  *R11+,R7          get the number of bytes to print
+       LI   R0,>27            TTYOUT
+       LI   R1,WS+12          use R6 as the location to print from
+       LI   R2,1              one char to print
+
+PRT2   MOVB *R3+,R5           get the next byte
+       SRL  R5,8              make it a word value
+       CLR  R4                clear R4 for the divide
+       DIV  @SIXTEENDEC,R4       divide this by sixteen
+       MOVB @HEXDEC(R4),R6    get the ASCII character (pointer to by R4)
+       XOP  @VIDEO,0          print it
+       MOVB @HEXDEC(R5),R6
+       XOP  @VIDEO,0
+       MOV  R7,R6             move R7 (byte value)
+       ANDI R6,>0001          mask all but bit 1
+       JEQ  NOSPACE           if zero, jump (must have been an even byte)
+       MOVB @H32,R6           ah-ha.. odd!  let's print a space to separate the
+       XOP  @VIDEO,0          words of hex.
+NOSPACE
+       DEC  R7                any more to do?
+       JNE  PRT2              yup
+       RT                     no, return
+
+**************************
+* MDOS write tty routine *
+**************************
+SVR0  DATA 0
+SVR1  DATA 0
+SVR2  DATA 0
+
+TTYOUT MOV  R0,@SVR0
+       MOV  R1,@SVR1
+       MOV  R2,@SVR2
+
+       MOV  *R11+,R1
+       MOV  *R11+,R2
+       LI   R0,>27
+       XOP  @VIDEO,0
+
+       MOV  @SVR0,R0
+       MOV  @SVR1,R1
+       MOV  @SVR2,R2
+       RT
+
+SIXTEENDEC DATA 16
+HEXDEC TEXT '0123456789ABCDEF'
+       DATA 0
+

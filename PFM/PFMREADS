@@ -1,0 +1,56 @@
+*
+* Routine: PFMREADS
+*
+LOADPFMMAP  DATA 0
+
+; 3.17.2024, Keep dup table in case one routine or another is paged out!!
+;      See PFMSAVES for mirror
+;
+PFMTABLE    DATA >F0F1,>F2F3,>F4F5,>F6F7,>F9FA,>FBFC,>FDFE,>FFFF  ;128k
+            DATA >FE00   ;3.17.2024, extra banks  ;+8k = 136k
+            DATA 0
+
+LOADPFM MOV R11,@LOADPFMRT+2
+
+*      <set pfm/pfm512 to eprom banks>
+       CLR  R12
+       SBZ  >14          system bank
+       SBZ  >1D
+
+       MOV  @>F114,@LOADPFMMAP   >8000->9FFF, >A000->bFFF
+       LI   R1,PFMTABLE
+       LI   R2,PGETBL+8       beginning of buffer
+
+LPFM0  MOVB *R1+,@>F114       SOURCE PAGE (PFM)
+       MOVB *R2+,@>F115       DEST PAGE (MEMORY)
+       LI   R3,>8000
+       LI   R4,>A000
+LPFM1  MOV  *R3+,*R4+
+       CI   R3,>A000
+       JNE  LPFM1
+
+       MOVB *R1,R0       CHECK FOR LAST PAGE if page==0
+       JEQ  LPFM10       DONE loading from PFM; go determine mdos ver/size
+
+       CI   R1,PFMTABLE+15    16TH bank?
+;      JNE  LPFM0             not yet, keep going as usual
+       JL   LPFM0
+
+* <set pfm to other bank for remaining two banks>
+       CLR  R12
+       SBO  >14          change to other bank, get  final 8K
+       SBO  >1D
+       JMP  LPFM0        go get the information
+*
+* must call "extract" routine and try to get version number.  Once we find
+*      a valid version, we can set the SCSISYS flag for 120/128k mdos size.
+*
+LPFM10 CLR  R12          reset PFM to FIRST flash bank for MDOS 5.00 compatibily
+       SBZ  >14
+       SBO  >1D
+       MOV  @LOADPFMMAP,@>F114               Restore mapper pages
+
+LOADPFMRT
+       B    @0
+
+* EOF, SAVELOADS

@@ -1,0 +1,58 @@
+********************************************************************************
+* PFMPRODs  - display product ID information
+*
+* 9-9-2018  Program only displays info; not meant for anything else
+*-------------------------------------------------------------------------------
+WS     EQU  >F000        my workspace
+
+*
+MAIN3  LWPI WS          LET'S LOAD OUR WORKSPACE
+       LIMI 0            turn off those interrupts!
+       BL   @TTYOUT      Give user a title
+       DATA TITLE1,0
+
+       BL   @PRODID
+       BL   @PRTHEX
+       DATA PRODID#,2
+
+       BL   @PRTHEX
+       DATA PFM_SECSIZE,2
+
+       BL   @PRTHEX
+       DATA PFM_SECTORS,2
+
+       MOV  @PFM_TEXT,@TT1
+       BL   @TTYOUT
+TT1    DATA 0,0
+
+       BL   @TTYOUT
+       DATA CRLF2,0
+
+       BLWP @0
+
+       COPY "PRODIDS"
+       COPY "OUTS"
+
+*
+TITLE1
+       BYTE 13,10
+       TEXT 'PFMPROD, Product ID Test 9-9-2018 '
+       BYTE 13,10,10
+       BYTE 0
+TITLE2 TEXT ' '
+       BYTE 0
+
+CRLF2  BYTE 13,10,0           *cr/llf combo for ttyout
+H32    BYTE >20
+HFF    BYTE >FF
+VIDEO  DATA 6            video xop
+MEM    DATA 7            memory manager xop
+IO     DATA 8            i/o xop
+UTIL   DATA 9            utility xop
+HEXA   DATA 10
+
+*
+WORK   EQU $             TTYOUT BUFFER
+*---------------------------------------------------------
+       END
+

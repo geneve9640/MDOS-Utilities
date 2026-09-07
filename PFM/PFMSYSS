@@ -1,0 +1,467 @@
+********************************************************************************
+* PFMSYS -  Geneve OS loader for PFM512 device
+*           Loader is independent of MDOS embedded CRC (unlike CYA)
+*
+*  1998   - original program LOADPFM
+* 9.9.2018  Updated to work with Atmel 040a; must add product ID code
+*           Consider adding support for other chips
+*           Incorporated PRODID (prodids) routine
+*
+* 9.10.2018
+*   This program now performs the following steps:
+*      1. Load OS into memory
+*      2. Check embedded MDOS CRC
+*      3. Tell user status [pass/fail] then ask permission to update
+*      4. Program or exit
+*      5. Validate
+*
+*   The MDOS embedded CRC is NOT the same as the PFM embedded CRC
+*      1. MDOS embedded CRC calculates all 16 banks, is inverted, and
+*         skips the bytes in bank #4 corresponding to the CRC itself
+*      2. PFM core CRC calculates the first 15 banks only, does NOT skip
+*         the embedded MDOS crc bytes. Therefore, we must calculate bank 4
+*         twice.
+*
+*  Left To Do :
+*      1. Update PFM512 loader  [COMPLETE 9.11.2018]
+*      2. Write utility to save OS from PFM to disk
+*      3. Update PFM CORE programmer for cross-chip compatibility
+;
+;
+;3.20.2021  Reviewed code; some issues with the tables.
+;           Plan: use pages FE and FF for 136K MDOS.
+;
+;      ---> COPY files around line 550
+;
+;3.26.2021  Modified 040 V7 core: eliminated product ID and CRC
+;           Simplified PFMSYS by removing CRC writing
+;      $$$$ Add code to test for wire fault (compare 4 banks)
+;
+;4.2.2021   Removed long crc displays.
+;
+;03.15.2024 Now using common (CRCMAINS) routines
+; v1.6      Fixed ttyout routine
+;           Updated EQUates
+;           No longer allow user to program bad MDOS file
+;      $$$$ Should still consider a validation routine before allowing user
+;           to reboot. Probably not much value, if it breaks...
+;
+;-------------------------------------------------------------------------------
+CYACRC# EQU >0000        configure crc buffers in this file (see crcmains)
+
+WS     EQU  >F000        my workspace
+*
+MAIN3  LWPI WS          LET'S LOAD OUR WORKSPACE
+       LIMI 0            turn off those interrupts!
+       BL   @TTYOUT      Give user a title
+       DATA TITLE1,0
+
+       BL   @PRODID      check product ID and get parameters
+       MOV  R0,R0
+       JNE  PFMFOUND
+
+       BL   @TTYOUT      no PFM; abort
+       DATA PFMERR,0
+
+       B    @EXIT
+
+
+PFMFOUND
+       BL   @TTYOUT      PFM identified; show information to user
+       DATA PFMDEV,0
+
+       BL   @PRTHEX
+       DATA PRODID#,2
+
+       MOV  @PFM_TEXT,@TTXX
+       BL   @TTYOUT
+TTXX   DATA 0,0
+
+       BL   @TTYOUT
+       DATA CRLF2,0
+
+       CLR  R0           Begin setting up for extra memory
+       XOP  @MEM,0       get free pages
+       CI   R1,OSTOTPAGES   ;136k for v7.x
+       JL   BYBY         if fewer available, exit..
+
+       LI   R0,1         get pages (R1 holds number available for our use)
+       LI   R2,8         VIRTUAL page 8 (pagetable starts AFTER 64K)
+       CLR  R3           Any RAM is ok
+       XOP  @MEM,0       get the RAM
+       ABS  R0           error?
+       JEQ  MEMOK        no
+
+BYBY   BL   @TTYOUT      memory error - report it!
+       DATA NOMEM,0
+       B    @EXIT
+
+MEMOK  LI   R0,4         get the memory table
+       LI   R1,PGETBL    and put it into the page table
+       LI   R2,254       this is overdoing it for 2Meg system, but who cares
+       XOP  @MEM,0       do it!
+***********************
+* GET THE FILE FROM CLI
+*
+* parse routine from who knows where... at least it works
+*
+       LI   R0,>3200          50 bytes for WORK length
+       LI   R1,WORK-1         patch it
+       MOVB R0,*R1+           crunch command line and move it to WORK
+       MOV  @>0128,R2         get command line argument address
+       JEQ  NOGOT             if no arguments
+       CB   @2(R2),@-1(R1)    see if command line is too long
+       JHE  NOGOT             if too long
+       MOV  R1,R5             else save address of WORK to R5
+       DEC  R5                to length pointer
+       MOVB @2(R2),R6         argument length
+       SRL  R6,8              make it a word
+       INCT R6                add two
+
+NXTNOD MOV  R2,R3             save command address
+       INCT R3                add 2
+       MOV  R2,R4
+       AI   R4,8
+GETNOD MOVB *R3+,*R5+         start moving the data
+       DEC  R6                till count is done
+       JEQ  GOTCMD
+
+       C    R3,R4             r3 holds node count
+       JL   GETNOD            if done this node, go get some more
+       MOV  *R2,R2            get next node
+       JMP  NXTNOD
+*
+GOTCMD MOVB @WORK-1,R1   length of argument
+       JEQ  NOGOT        if no arg
+       SRL  R1,8         else make it a word
+       INC  R1           and add 1 for the loop conter
+
+       LI   R2,40        largest filename possible
+       LI   R4,WORK      address of command line text
+GETFIL CB   *R4+,@H32    look for a space in the command line (filename)
+       JLE  GOTFIL       if ASCII 0-32, we have the filename
+       DEC  R1           don't have it yet, count down
+       JEQ  NOGOT        we done with arguments?
+       DEC  R2           we done with the 40 possible bytes of filename?
+       JNE  GETFIL
+
+NOGOT  BL   @TTYOUT
+       DATA TITLE2,0
+       BL   @TTYOUT
+       DATA USAGE,0
+       B    @EXIT
+*
+GOTFIL
+SETUPTHEPARSE
+       CLR  R0           we have the filename, now put a null at end
+       DEC  R4           back to the previous byte
+       MOVB R0,*R4       then write a null
+       LI   R0,8         parse the filename
+       LI   R1,WORK      get logical filename from here
+       LI   R2,LEN+1     and put hardware name in the pab
+       CLR  R3           what the hell is an alias prefix?
+       XOP  @UTIL,0      go do the parse
+*
+*ALL DONE PARSING, GETTING NAME, ETC.  NOW TO THE GOOD STUFF!
+*----------------------------------------------------------------------------
+*
+       BL   @TTYOUT
+       DATA OPENING,0
+
+       LI   R0,FILE
+       XOP  @IO,0
+       MOVB @FILE+2,R1        check for an error
+       JEQ  GOODFILE2         wrong file, incorrect size, etc
+       BL   @TTYOUT           show the error
+       DATA IOERR,0
+       B    @EXIT
+*
+* verify CRC
+*
+GOODFILE2
+       BL   @TTYOUT
+       DATA VERIFYING,0
+
+         BLWP @SHOWCRC     ;3.16.2024, crcmains
+
+       BL   @TTYOUT
+       DATA SHORT,0      ;Display the distribution/simple CRC
+
+       BL   @PRTHEX
+       DATA USERCRC,2
+
+       ABS  @CRCGOOD     ;was CRC good?
+       JNE  NOGOOD
+
+       BL   @TTYOUT
+       DATA GOODCRC,0
+       JMP  ASKUSER
+
+NOGOOD BL   @TTYOUT      ; *****BAD*********
+       DATA BADCRC,0     ;should we force exit or allow user to do it anyway?
+       JMP  EXIT
+
+; ask user to confirm program step
+ASKUSER
+       BL   @TTYOUT
+       DATA PROGRAMYN,0
+
+       CLR  R0
+KEYL2  XOP  @KEY,0
+       SRL  R1,8
+       ANDI R1,>005F
+       CI   R1,'Y'
+       JEQ  PROGRAMIT
+       CI   R1,'N'
+       JEQ  EXIT
+       JNE  KEYL2
+
+PROGRAMIT
+       BL   @TTYOUT
+       DATA PROGRAMMING,0
+
+*-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-==-=-=-=-
+       BL   @PFM              program flashdisk
+
+       BL   @TTYOUT
+       DATA COMPLETE,0        tell user we are done
+
+*------------------------------
+EXIT   BL   @TTYOUT           normal exit
+       DATA CRLF2,2           with a CRLF
+       LI   R0,>06            RELEASE MDOS MEMORY
+       LI   R1,1
+       XOP  @MEM,0
+       BLWP @0                Thank MDOS for working so well, then exit
+
+* PFM PROGRAMMING CODE (OS final 8k in page 63)
+*
+* >14  >1D|              Page
+*---------+-----------------------------------------------------------------
+*  0    0 | 0   1  2  3  4  5  6  7  8  9 10 11 12 13 14 15    System
+*  1    0 | 16 17                                        31    Flash #2
+*  0    1 | 32 33                                        47    Flash #1
+*  1    1 | 48 49                                        63    Flash #3
+*         |
+PFM    LI   R1,>F1F2     set pages for PFM
+       MOVB R1,@>F111
+       SWPB R1
+       MOVB R1,@>F112
+
+GP     CLR  R9           COUNTER (base 0)
+       LI   R4,PGETBL+8  STARTING PAGE @>10000
+
+HI     LI   R1,>8000     F114   (OUTER LOOP)
+       LI   R2,>A000     F115
+GZ     MOVB @PAGELIST(R9),@>F115   DEST.
+
+* R9 = current page from table
+
+HB     MOVB *R4+,@>F114  map our data @>8000->9FFF each time around
+       CLR  R8
+       CLR  R12
+       SBZ  >14          System page
+       SBZ  >1D          bank 0
+;
+;0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 (15 banks)
+;
+       CI   R9,15        pages 0-14 are in first bank
+       JL   HH
+;
+;15 16  (2 banks)
+;
+       SBO  >14          flip to bank #3/pfm512
+       SBO  >1D          15 and 16 here; 17 if >F8
+       CI   R9,17        page 17?
+       JL   HH           no
+
+       RT              <<yes, DONE>>
+
+;------
+; this is the actual programming loop - based on device sector size
+HH     SBO  >15          INNER LOOP
+       CLR  R8
+       MOVB @HC,@>5555 aa SET IP WRITE
+       MOVB @HD,@>2AAA 55
+       MOVB @HE,@>5555 a0
+       NOP                safegaurd
+HF     MOVB *R1+,*R2+
+       INC  R8
+
+       C    R8,@PFM_SECSIZE   proper #bytes written?
+       JNE  HF
+
+; done programming, now we VERIFY
+       CLR  R8           reset
+       SBZ  >15          toggle
+       DEC  R1
+       DEC  R2
+HG     CB   *R1,*R2      programmed?
+       JNE  HG           not yet, keep waiting
+       INC  R2           got it! inc
+       INC  R1           both counters
+       CI   R2,>C000     end of this bank?
+       JNE  HH           loop again
+
+       INC  R9           next page
+       JMP  HI           tested above at HB
+
+
+*-------------------------------------------------------------------------------
+* This may be a bit different, but I got it to work.  Prints the HEX
+* representation starting with the byte pointed to by R3.  R7 contains the
+* number of bytes to print (starting at R3).
+*
+PRTHEX MOV  *R11+,R3          get the starting location
+       MOV  *R11+,R7          get the number of bytes to print
+       LI   R0,>27            TTYOUT
+       LI   R1,WS+12          use R6 as the location to print from
+       LI   R2,1              one char to print
+
+PRT2   MOVB *R3+,R5           get the next byte
+       SRL  R5,8              make it a word value
+       CLR  R4                clear R4 for the divide
+       DIV  @SIXTEEN,R4       divide this by sixteen
+       MOVB @HEXDEC(R4),R6    get the ASCII character (pointer to by R4)
+       XOP  @VIDEO,0          print it
+       MOVB @HEXDEC(R5),R6
+       XOP  @VIDEO,0
+       MOV  R7,R6             move R7 (byte value)
+       ANDI R6,>0001          mask all but bit 1
+       JEQ  NOSPACE           if zero, jump (must have been an even byte)
+       MOVB @H32,R6           ah-ha.. odd!  let's print a space to separate the
+       XOP  @VIDEO,0          words of hex.
+NOSPACE
+       DEC  R7                any more to do?
+       JNE  PRT2              yup
+       RT                     no, return
+
+**************************
+* MDOS write tty routine *
+**************************
+TTYOUT MOV  *R11+,R1     get data address
+       MOV  *R11+,R2     get length of data to write
+       LI   R0,>0027
+       XOP  @VIDEO,0
+       RT
+
+******************************************************
+*      Old faithful...
+*
+CRCUPDATE
+       MOVB *R0+,R1
+       ANDI R1,>FF00     CLEAR LSBYTE
+       XOR  R1,R8        XOR NEW DATA WITH OLD CRC
+       MOV  R8,R1        MOVE TO SCRATCH REGISTER
+       SRL  R1,4
+       XOR  R8,R1        XOR CRC WITH SCRATCH
+       ANDI R1,>FF00     CLEAR LSB
+       SRL  R1,4
+       XOR  R1,R8        XOR SCRATCH WITH CRC
+       SRC  R1,7
+       XOR  R1,R8        XOR SCRATCH WITH CRC
+       SWPB R8           REVERSE BYTES OF CRC
+       RT
+
+       COPY "PRODIDS"
+       COPY "..\CRC\CRCMAINS"        3.17.2024 final
+
+
+* end of code, data follows
+*
+NOMEM  TEXT 'Insufficient Memory.'
+       BYTE >0D,>0A,0
+       EVEN
+OPENING
+       BYTE 13,10
+       TEXT 'Reading file...'
+       BYTE 13,10,0
+
+TITLE1
+       BYTE 13,10
+       TEXT 'PFMSYS, Geneve OS 136K loader v1.6     [17 March 2024tt]'
+       BYTE 13,10,0
+
+TITLE2 TEXT ' '
+       BYTE 0
+
+GOODCRC     BYTE 13,10,10
+            TEXT 'Geneve OS integrity confirmed.'
+            BYTE 13,10,0
+
+BADCRC      BYTE 13,10,10
+            TEXT 'WARNING: Geneve OS integrity compromised - CRC mismatch!'
+            BYTE 13,10,10,0
+
+USAGE  BYTE 13,10,9
+       TEXT 'Usage:  PFMSYS mdosfile      (quotes around backslash)'
+       BYTE 13,10,0
+
+VERIFYING   BYTE 10
+            TEXT 'Checking OS Integrity...'
+            BYTE 0
+
+SHORT  TEXT ' Calculated CRC: '
+       BYTE 0
+
+IOERR  BYTE 13,10
+       TEXT 'ERROR: Could not open INPUT file!'
+       BYTE 13,10,10,0
+
+PROGRAMYN
+       BYTE 13,10
+       TEXT 'CONFIRM: Program PFM (Y/N)?'
+       BYTE 0
+
+PROGRAMMING
+       BYTE 13,10,10
+       TEXT 'Programming...'
+       BYTE 0
+
+COMPLETE
+       TEXT 'Complete!'
+       BYTE 13,10,0
+
+
+CRLF2  BYTE 13,10,0           *cr/llf combo for ttyout
+H32    BYTE >20
+HFF    BYTE >FF
+KEY    DATA 5
+VIDEO  DATA 6            video xop
+MEM    DATA 7            memory manager xop
+IO     DATA 8            i/o xop
+UTIL   DATA 9            utility xop
+HEXA   DATA 10
+
+PAGELIST    DATA >F0F1,>F2F3,>F4F5,>F6F7
+            DATA >F9FA,>FBFC,>FDFE    ;,>FFFF
+;populate FFFE backwards until we fix the PFM copy routine
+            DATA >FFFF   ;flip to bank 3 for 2nd >FF
+            DATA >FE00   ;and FE
+            DATA 0
+
+HC     BYTE >AA
+HD     BYTE >55
+HE     BYTE >A0
+       BYTE 0
+       EVEN
+
+SIXTEEN     DATA 16
+HEXDEC TEXT '0123456789ABCDEF'
+*
+FILE  DATA >0A00,>0001,0,>0000,0,0,544      ;MDOS 7.0+ ; TIPI requires BREAD
+*
+LEN    DATA >0028   * --> status byte / length byte
+FNAME  EQU  $
+
+WORK   EQU  FNAME+50
+PGETBL EQU  WORK+80                          ;memory map
+
+; see CRCMAINS
+CRCTABLE512 EQU  PGETBL+264                  ;table
+SAVE9995    EQU  CRCTABLE512+520             ;store 9995 during crc
+NEXTBUF     EQU  SAVE9995+256                ;placeholder
+
+*---------------------------------------------------------
+       END
+

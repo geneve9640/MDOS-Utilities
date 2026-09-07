@@ -1,0 +1,201 @@
+********************************************************************************
+; PFMCRCS - Simple program to validate the OS within a PFM device
+;
+;03.21.2024 Created program from pfmsys base
+;
+;-------------------------------------------------------------------------------
+CYACRC# EQU >0000        configure crc buffers in this file (see crcmains)
+
+WS     EQU  >F000        my workspace
+*
+MAIN3  LWPI WS
+       LIMI 0            turn off those interrupts!
+       BL   @TTYOUT      Give user a title
+       DATA TITLE1,0
+
+       BL   @PRODID      check product ID and get parameters
+       MOV  R0,R0
+       JNE  PFMFOUND
+
+       BL   @TTYOUT      no PFM; abort
+       DATA PFMERR,0
+
+       B    @EXIT
+
+
+PFMFOUND
+       BL   @TTYOUT      PFM identified; show information to user
+       DATA PFMDEV,0
+
+       BL   @PRTHEX
+       DATA PRODID#,2
+
+       MOV  @PFM_TEXT,@TTXX
+       BL   @TTYOUT
+TTXX   DATA 0,0
+
+       BL   @TTYOUT
+       DATA CRLF2,0
+
+       CLR  R0           Begin setting up for extra memory
+       XOP  @MEM,0       get free pages
+       CI   R1,OSTOTPAGES   ;136k for v7.x
+       JL   BYBY         if fewer available, exit..
+
+       LI   R0,1         get pages (R1 holds number available for our use)
+       LI   R2,8         VIRTUAL page 8 (pagetable starts AFTER 64K)
+       CLR  R3           Any RAM is ok
+       XOP  @MEM,0       get the RAM
+       ABS  R0           error?
+       JEQ  MEMOK        no
+
+BYBY   BL   @TTYOUT      memory error - report it!
+       DATA NOMEM,0
+       B    @EXIT
+
+MEMOK  LI   R0,4         get the memory table
+       LI   R1,PGETBL    and put it into the page table
+       LI   R2,254       this is overdoing it for 2Meg system, but who cares
+       XOP  @MEM,0       do it!
+
+*
+* verify CRC
+*
+GOODFILE2
+
+       BL   @LOADPFM     ;pfmreads
+
+       BL   @TTYOUT
+       DATA VERIFYING,0
+
+         BLWP @SHOWCRC     ;3.16.2024, crcmains
+
+       BL   @TTYOUT
+       DATA SHORT,0      ;Display the distribution/simple CRC
+
+       BL   @PRTHEX
+       DATA USERCRC,2
+
+;;   BL   @PRTHEX
+;;   DATA MDOSCRC,34
+;;
+;;     BL @TTYOUT        show both long CRCs for debug
+;;     DATA CRLF2,0
+;;   BL   @PRTHEX
+;;   DATA CRCLIST,34
+
+       ABS  @CRCGOOD     ;was CRC good?
+       JNE  NOGOOD
+
+       BL   @TTYOUT
+       DATA GOODCRC,0
+       JMP  EXIT
+
+NOGOOD BL   @TTYOUT      ; *****BAD*********
+       DATA BADCRC,0     ;should we force exit or allow user to do it anyway?
+
+*------------------------------
+EXIT   BL   @TTYOUT           normal exit
+       DATA CRLF2,2           with a CRLF
+       LI   R0,>06            RELEASE MDOS MEMORY
+       LI   R1,1
+       XOP  @MEM,0
+       BLWP @0                Thank MDOS for working so well, then exit
+
+
+*-------------------------------------------------------------------------------
+* This may be a bit different, but I got it to work.  Prints the HEX
+* representation starting with the byte pointed to by R3.  R7 contains the
+* number of bytes to print (starting at R3).
+*
+PRTHEX MOV  *R11+,R3          get the starting location
+       MOV  *R11+,R7          get the number of bytes to print
+       LI   R0,>27            TTYOUT
+       LI   R1,WS+12          use R6 as the location to print from
+       LI   R2,1              one char to print
+
+PRT2   MOVB *R3+,R5           get the next byte
+       SRL  R5,8              make it a word value
+       CLR  R4                clear R4 for the divide
+       DIV  @SIXTEEN,R4       divide this by sixteen
+       MOVB @HEXDEC(R4),R6    get the ASCII character (pointer to by R4)
+       XOP  @VIDEO,0          print it
+       MOVB @HEXDEC(R5),R6
+       XOP  @VIDEO,0
+       MOV  R7,R6             move R7 (byte value)
+       ANDI R6,>0001          mask all but bit 1
+       JEQ  NOSPACE           if zero, jump (must have been an even byte)
+       MOVB @H32,R6           ah-ha.. odd!  let's print a space to separate the
+       XOP  @VIDEO,0          words of hex.
+NOSPACE
+       DEC  R7                any more to do?
+       JNE  PRT2              yup
+       RT                     no, return
+
+**************************
+* MDOS write tty routine *
+**************************
+TTYOUT MOV  *R11+,R1     get data address
+       MOV  *R11+,R2     get length of data to write
+       LI   R0,>0027
+       XOP  @VIDEO,0
+       RT
+
+       COPY "PRODIDS"
+       COPY "PFMREADS"
+       COPY "..\CRC\CRCMAINS"        3.17.2024 final
+
+* end of code, data follows
+*
+NOMEM  TEXT 'Insufficient Memory.'
+       BYTE >0D,>0A,0
+       EVEN
+
+TITLE1
+       BYTE 13,10
+       TEXT 'PFMCRC v1.0, Verify MDOS installed in PFM    [21 March 2024tt]'
+       BYTE 13,10,0
+
+TITLE2 TEXT ' '
+       BYTE 0
+
+GOODCRC     BYTE 13,10,10
+            TEXT 'Geneve OS integrity confirmed.'
+            BYTE 13,10,0
+
+BADCRC      BYTE 13,10,10
+            TEXT 'WARNING: Geneve OS integrity compromised - CRC mismatch!'
+            BYTE 13,10,10,0
+
+VERIFYING   BYTE 10
+            TEXT 'Checking OS Integrity...'
+            BYTE 0
+
+SHORT  TEXT ' Calculated CRC: '
+       BYTE 0
+
+CRLF2  BYTE 13,10,0           *cr/llf combo for ttyout
+H32    BYTE >20
+HFF    BYTE >FF
+KEY    DATA 5
+VIDEO  DATA 6            video xop
+MEM    DATA 7            memory manager xop
+IO     DATA 8            i/o xop
+UTIL   DATA 9            utility xop
+HEXA   DATA 10
+
+
+SIXTEEN     DATA 16
+HEXDEC TEXT '0123456789ABCDEF'
+*
+WORK   EQU  $
+PGETBL EQU  WORK+80                          ;memory map
+
+; see CRCMAINS
+CRCTABLE512 EQU  PGETBL+264                  ;table
+SAVE9995    EQU  CRCTABLE512+520             ;store 9995 during crc
+NEXTBUF     EQU  SAVE9995+256                ;placeholder
+
+*---------------------------------------------------------
+       END
+
